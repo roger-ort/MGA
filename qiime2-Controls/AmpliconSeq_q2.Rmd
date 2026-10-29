@@ -1,0 +1,695 @@
+---
+title: "Bisanz Lab QIIME2 Pipeline v2.1: qiime2-2023.5"
+date: 'Run at `r format(Sys.time(), "%Y-%m-%d %H:%M")`'
+output: 
+  html_document:
+    code_folding: show 
+    theme: spacelab
+    highlight: monochrome
+    fig_width: 11
+    fig_height: 8.5
+    toc: true
+    toc_float: true
+---
+  
+# Change Log
+
+## 5 August 2024
+
+* Modified input parameters for NextSeq 2000 XLEAP
+* Added visualization for controls using recommended sample naming conventions
+* Added embedded downloads for ASV table and phylogenetic tree (qiime2 artifacts), taxonomy (both gg2 qiime2 artifact and dada2 tsv) for downstream analysis
+
+## 16 August 2023
+
+* Updated to qiime2-2023.5
+* Updated qiime taxonomic classifier to green genes 2 
+* Discontinued support for dual-golay correction in favour of unique dual index strategy/NextSeq 600 cycle kits
+* Discontinued support for SEPP fragment insertion trees as were not being used
+
+# Instructions and User Parameters
+  
+  Modify the user parameters below. If this is your first time using any lab conda environment, add "source /data/shared_resources/conda_local/etc/profile.d/conda.sh" to your ~/.bash_profile using nano or equivalent.
+
+After adjusting the settings below, run from the command line by invoking the following commands:
+  
+```
+conda activate qiime2-2023.5
+nohup Rscript -e "rmarkdown::render('AmpliconSeq_q2.Rmd')" > run.log &
+```
+
+```{bash settings}
+echo "export TemplateXLSX=/data/SequencingRuns/2025May05_Amplicon10/jbmod_Amplicon10_IndexTrackingSheet_22May2025.xlsx" > settings.txt #an absolute link to the location of your run template
+echo "export Project=Macalady8|Controls" >> settings.txt # This would be the Sample_Project Column. Leave this as * if you want to get all samples from the sheet. Include |Controls to pull run controls as well.
+echo "export ReadDir=/data/SequencingRuns/2025May05_Amplicon10/reads" >> settings.txt #an absolute directory containing your demultiplexed reads
+echo "export TrimAdapters=true" >> settings.txt  #Set to true if primer is in sequence and needs to be removed
+echo "export Fprimer=^GTGYCAGCMGCCGCGGTAA" >> settings.txt  #515Fmod, replace if different primer. Note older V4f primer is GTGCCAGCMGCCGCGGTAA
+echo "export Rprimer=^GGACTACNVGGGTWTCTAAT" >> settings.txt  #806Rmod, replace if different primer Note older V4r primer is GGACTACHVGGGTWTCTAAT
+echo "export TruncF=220" >> settings.txt  #equivalent to p-trunc-len-f
+echo "export TruncR=150" >> settings.txt  #equivalent to p-trunc-len-r
+echo "export TrimL=0" >> settings.txt  #equivalent to trim-left-f, updated to 0 as primers already stripped
+echo "export TrimR=0" >> settings.txt  #equivalent to trim-left-r, updated to 0 as primers already stripped
+echo "export Suffix=_S[0-9]{1,3}_R[0-9]_001" >> settings.txt  # A regex pattern used to remove the suffix from the reads. The current provided would match BA-10112021-Negative-Control_S328_L001_R1_001.fastq.gz. 
+echo "export MinSVLen=250" >> settings.txt  # the minimum size for a sequence variant to be included in table
+echo "export MaxSVLen=255" >> settings.txt  # the maximum size for a sequence variant to be included in table
+echo "export ExportTrimmedReads=true" >> settings.txt # should the adapter-trimmed reads be exported (to upload to SRA etc)
+echo "export NSLOTS=6" >> settings.txt  # use 18 cores for processing
+source settings.txt
+```
+
+***
+  
+# System set up
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=F, warning=F)
+```
+
+
+Note: libraries called here are installed within the qiime conda environment rather than the R Studio Server's libraries.
+
+```{r sysset, message=F, warning=F}
+library(rmarkdown)
+library(tidyverse)
+library(readxl)
+library(dada2)
+library(plotly)
+library(ggtree)
+library(qiime2R)
+library(ShortRead)
+sessionInfo()
+getwd()
+```
+
+
+```{r settingimport}
+#import variables into R with the same names as bash
+for(l in readLines("settings.txt")){
+  l<-str_split(gsub("export ", "", l), "=")[[1]]
+  assign( l[1], l[2])
+}
+rm(l)
+```
+
+
+## Directories
+
+```{r dirset}
+dir.create("Intermediates", showWarnings=FALSE)
+dir.create("Output", showWarnings=FALSE)
+dir.create("Figures", showWarnings=FALSE)
+dir.create("Logs", showWarnings=FALSE)
+```
+
+***
+
+# Import Samples
+
+
+
+```{r writemanifest}
+SampleSheet<-SampleSheet %>% filter(!is.na(Forward_Read)) %>% mutate(Nreads_illumina=countFastq(Forward_Read)$records)
+
+write_csv(SampleSheet, "Logs/Nreads_raw.txt")
+
+  fastqs %>%
+    select(`sample-id`=1, forward=2, reverse=3) %>%
+    gather(-`sample-id`, value=`absolute-filepath`, key=`direction`) %>%
+    select(1,3,2) %>%
+    arrange(`sample-id`) %>%
+    filter(`sample-id`!="Undetermined") %>%
+    filter(`sample-id` %in% SampleSheet$Sample_ID) %>%
+    write_csv("Intermediates/manifest.csv")
+```
+
+# Read quality
+
+Inspect the plot below to make sure that the default trimming parameters are appropriate (220/150). Note that trimming is after adapter removal so the actual point of clipping is 20bp after the parameter (ie 240/170). 3 random samples are being pulled. Note: negative controls will likely show a steep drop off in quality which is due to the remaining reads being adapter dimers rather than complete sequences.
+
+```{r plotreadqual}
+SampleSheet %>%
+  sample_n(3) %>%
+  select(Forward_Read, Reverse_Read) %>%
+  gather() %>%
+  arrange(value) %>%
+  pull(value) %>%
+  plotQualityProfile() +
+  facet_wrap(~file, ncol = 2)
+ggsave("Figures/ReadQuality.pdf", device="pdf", height=8.5, width=11)
+```
+
+# Generate Read Artifact
+
+Q2 requires the reads in a single zip directory/artifact. This will be erased after the pipeline is run to not store multiple copies of the sequencing data.
+
+```{bash makereads}
+if [ ! -f $PWD/Intermediates/Reads.qza ]; then
+  echo $(date) Generating Read Artifact
+  
+  qiime tools import \
+    --type 'SampleData[PairedEndSequencesWithQuality]' \
+    --input-path $PWD/Intermediates/manifest.csv \
+    --output-path $PWD/Intermediates/Reads.qza \
+    --input-format PairedEndFastqManifestPhred33
+    
+else
+    echo $(date) Skipping making Read Artifact as already complete
+fi
+```
+
+# Primer Trimming
+
+In this step, the reads are being scanned for the presence of the primary PCR primers. In this sequencing strategy, the primers are sequenced so a valid read will start with a primer. We are only keeping sequences which contain a valid primer seq with no more than 3 errors in 20bp (--p-error-rate 0.15).
+
+```{bash primertrim}
+source settings.txt
+if $TrimAdapters; then
+echo $(date) Trimming adapters
+  qiime cutadapt trim-paired \
+    --i-demultiplexed-sequences $PWD/Intermediates/Reads.qza \
+    --p-cores $NSLOTS \
+    --p-front-f $Fprimer \
+    --p-front-r $Rprimer \
+    --p-no-indels \
+    --p-match-adapter-wildcards \
+    --p-discard-untrimmed \
+    --p-error-rate 0.15 \
+    --verbose \
+    --o-trimmed-sequences $PWD/Intermediates/Reads_filt.qza
+else
+  echo $(date) NOT trimming adapters
+  mv $PWD/Intermediates/Reads.qza $PWD/Intermediates/Reads_filt.qza
+fi
+```
+
+Optionally export fastq files for upload to SRA.
+
+```{bash exportreads}
+source settings.txt
+if $ExportTrimmedReads; then
+ echo $(date) Exporting trimmed reads to reads_trimmed
+  qiime tools export \
+  --input-path $PWD/Intermediates/Reads_filt.qza \
+  --output-path $PWD/Reads_forSRA
+else
+  echo $(date) Skipping read export
+fi
+```
+
+***
+
+# Dada2 and Feature Table Building
+
+This next step encompasses the Dada2 workflow. Reads are trimmed, quality filtered, denoised, and chimeras are removed.
+
+```{bash dada2}
+source settings.txt
+if [ ! -f $PWD/Logs/Dada_stats.qza ]; then
+  echo $(date) Running Dada2
+  
+  qiime dada2 denoise-paired \
+    --i-demultiplexed-seqs $PWD/Intermediates/Reads_filt.qza \
+    --p-trunc-len-f $TruncF \
+    --p-trunc-len-r $TruncR \
+    --p-trim-left-f $TrimL \
+    --p-trim-left-r $TrimR \
+    --p-n-threads $NSLOTS \
+    --o-table $PWD/Intermediates/SVtable.qza \
+    --o-representative-sequences $PWD/Intermediates/SVsequences.qza \
+    --o-denoising-stats $PWD/Logs/Dada_stats.qza \
+    --verbose
+    
+else
+  echo $(date) Skipping Dada2 as already complete
+fi
+```
+
+# In Silico Size Selection
+
+In this section we will limit the size range of amplicons to remove artifacts and/or strip mitochondrial reads. Carefully inspect the size distribution in the plot below and review the number of reads lost. This should generally be less than 1%.
+
+```{bash sizeselect}
+source settings.txt
+qiime feature-table filter-seqs \
+    --i-data $PWD/Intermediates/SVsequences.qza \
+    --m-metadata-file $PWD/Intermediates/SVsequences.qza \
+    --p-where "length(sequence) > $MinSVLen" \
+    --o-filtered-data $PWD/Intermediates/SVsequences_lowpass.qza
+    
+qiime feature-table filter-seqs \
+    --i-data $PWD/Intermediates/SVsequences_lowpass.qza \
+    --m-metadata-file $PWD/Intermediates/SVsequences_lowpass.qza \
+    --p-where "length(sequence) < $MaxSVLen" \
+    --o-filtered-data $PWD/Output/ASV_sequences.qza
+```
+
+```{r svlist}
+read_qza("Output/ASV_sequences.qza")$data %>%
+  names() %>%
+  tibble(`feature-id`=.) %>%
+  write_tsv("Intermediates/SVs_passing_size.txt")
+```
+
+```{bash sizeselecttable}
+qiime feature-table filter-features \
+  --i-table Intermediates/SVtable.qza \
+  --m-metadata-file Intermediates/SVs_passing_size.txt \
+  --o-filtered-table Output/ASV_table.qza
+```
+
+```{r sizecheck}
+read_qza("Output/ASV_sequences.qza")$data %>% sapply(., length) %>% tibble(ASV_Length=.) %>% mutate(Step="Post_filter") %>%
+  bind_rows(
+    read_qza("Intermediates/SVsequences.qza")$data %>% sapply(., length) %>% tibble(ASV_Length=.) %>% mutate(Step="Pre_filter")
+  ) %>%
+  ggplot(aes(x=ASV_Length, color=Step)) + geom_freqpoly() + theme_q2r() + ylab("N features")
+ggsave("Figures/ASV_lengths.pdf", height=3, width=4, useDingbats=F)
+
+read_qza("Output/ASV_sequences.qza")$data %>% sapply(., length) %>% tibble(ASV_Length=.) %>% group_by(ASV_Length) %>% summarize(N=n()) %>% knitr::kable()
+
+print(paste0(
+  "Size selection removed ",
+  (sum(read_qza("Intermediates/SVtable.qza")$data)-sum(read_qza("Output/ASV_table.qza")$data))/sum(read_qza("Intermediates/SVtable.qza")$data)*100,
+  "% of reads"
+))
+```
+
+
+# Read Tracking
+
+The purpose this section is to examine the number of reads lost on a per sample basis at each step of the pipeline. Also to spot if there are any issues with locations on plates and/or any evidence of column/column tranpositions.
+
+
+```{r readloss}
+ReadTracking<-
+  SampleSheet %>%
+  select(Sample_ID, Sample_Plate, Sample_Well, Nreads_illumina)
+  
+ReadTracking<-
+  ReadTracking %>%
+  left_join(
+    read_qza("Logs/Dada_stats.qza")$data %>%
+     rownames_to_column("Sample_ID") %>%
+      select(Sample_ID, Primer_Trimming=input, Dada2_Filtering=filtered, Dada2_Denoising=denoised, Dada2_Overlap=merged, Dada2_ChimeraRemoval=non.chimeric)
+  )
+  
+ReadTracking<-
+ReadTracking %>%
+  left_join(
+    read_qza("Output/ASV_table.qza")$data %>%
+    colSums() %>% data.frame(Size_Selection=.) %>% rownames_to_column("Sample_ID")
+  )
+
+interactive_table(ReadTracking)
+```
+
+## By Step in Pipeline
+
+```{r lossbystep}
+
+rplot<-
+ReadTracking %>%
+  pivot_longer(!c(Sample_ID, Sample_Well, Sample_Plate),  names_to="Step", values_to ="Nreads") %>%
+  mutate(Step=factor(Step, levels=colnames(ReadTracking)[-(1:3)])) %>%
+  ggplot(aes(x=Step, y=Nreads, group=Sample_ID, label=Sample_ID)) +
+  geom_line() +
+  theme_q2r() +
+  ylab("Number of Reads") +
+  xlab("Pipeline Step") +
+  theme(axis.text.x = element_text(angle=45, hjust=1))
+
+ggplotly(rplot)
+ggsave("Figures/Read_Tracking.pdf", rplot, device="pdf", height=6, width=4, useDingbats=F)
+rm(rplot)
+```
+
+
+## Sample Location
+
+Be sure to cross reference these results against your sample layout including where the negative controls are.
+
+```{r readlayout}
+ReadTracking %>%
+  mutate(Row=gsub("[0-9]","", Sample_Well)) %>%
+  mutate(Column=gsub("[A-Z]","", Sample_Well)) %>%
+  mutate(Row=factor(Row, levels=rev(LETTERS[1:8]))) %>%
+  mutate(Column=as.numeric(Column)) %>%
+  dplyr::rename(FinalReadCount=Size_Selection) %>%
+  mutate(FinalReadCount=if_else(is.na(FinalReadCount), 0, FinalReadCount)) %>%
+  ggplot(aes(x=Column, y=Row, fill=FinalReadCount, label=Sample_ID)) +
+  geom_tile() +
+  geom_text(size=0.5) +
+  scale_fill_gradient(low="white",high="indianred") +
+  theme_q2r() +
+  scale_x_continuous(breaks = 1:12) +
+  coord_cartesian(expand=F) +
+  facet_wrap(~Sample_Plate)
+
+ggsave("Figures/Reads_by_layout.pdf", height=8.5, width=11, useDingbats=F)
+```
+
+## Comparison to Pooling Volumes
+
+This is help to detect systematic problems that may have occurred during quantification/normalization. Hopefully there would be no relationship if normalized correctly
+
+```{r readcorr}
+loadcorr<-
+ReadTracking %>%
+  left_join(
+    read_excel(TemplateXLSX, sheet="Loading.csv", skip=1) %>% dplyr::rename(Sample_ID=SampleID, Volume_ul=volume)
+  )
+  
+loadcorr %>%
+  filter(Size_Selection>=5000) %>%
+  ggplot(aes(x=Volume_ul, y=Size_Selection)) +
+  geom_point() +
+  theme_q2r() +
+  geom_smooth(method="loess") +
+  xlab("Volume Pooled (ul)") +
+  ylab("Final Read Count")
+
+rm(loadcorr)
+ggsave("Figures/Reads_by_loadingvolume.pdf", height=8.5, width=11, useDingbats=F)
+```
+
+## Count Distribution
+
+Hopefully the read counts are fairly normally distributed.
+
+```{r readtracking}
+ReadTracking %>%
+  ggplot(aes(x=Size_Selection)) +
+  geom_freqpoly(bins=20) +
+  theme_q2r() +
+  ylab("# Samples") +
+  xlab("# Reads")
+ggsave("Figures/Read_Tracking.pdf", device="pdf", height=2, width=3, useDingbats=F)
+```
+
+***
+
+# Taxonomic Assignment
+
+## QIIME feature-classifier
+
+This is assigning taxonomy against the current version of the Green Genes database (specific to V4). This would need to be updated for alternate seq strategies.
+
+```{bash q2tax}
+source settings.txt
+if [ ! -f $PWD/Output/SV_taxonomy_QIIME.qza ]; then
+  echo $(date) Assignning Taxonomy with QIIME2
+  
+  qiime feature-classifier classify-sklearn \
+    --i-classifier /data/shared_resources/databases/Q2_2023.5_db/gg_2022_10_backbone.v4.nb.qza \
+    --i-reads $PWD/Output/ASV_sequences.qza \
+    --o-classification $PWD/Output/ASV_q2taxonomy.qza \
+    --p-n-jobs $NSLOTS
+else
+  echo $(date) Skipping QIIME2 taxonomy as already complete
+fi
+```
+
+## Dada2 feature-classifier
+
+```{r dadatax}
+if(!file.exists("Output/ASV_d2taxonomy.txt")){
+  message(date(), " Assigning taxonomy with dada2")
+  seqs<-read_qza("Output/ASV_sequences.qza")$data
+  taxonomy <- assignTaxonomy(as.character(seqs), "/data/shared_resources/databases/Q2_2023.5_db/silva_nr99_v138.1_wSpecies_train_set.fa.gz", multithread=as.integer(NSLOTS))
+  taxonomy <- addSpecies(taxonomy, "/data/shared_resources/databases/Q2_2023.5_db/silva_species_assignment_v138.1.fa.gz", allowMultiple=TRUE)
+  
+  colnames(taxonomy)[8]<-"Species_ambiguous"
+  
+  as.data.frame(taxonomy) %>% 
+    rownames_to_column("Sequence") %>% 
+    left_join(tibble(ASV=names(seqs), Sequence=as.character(seqs))) %>%
+    select(ASV, Kingdom, Phylum, Class, Order, Family, Genus, Species, Species_ambiguous, Sequence) %>%
+    write_tsv("Output/ASV_d2taxonomy.txt")
+} else {
+    message(date(), " Skipping Dada2 taxonomy as already complete")
+}
+```
+
+## Classification Rates
+
+Depending on the origin of the sample there could be quite variable rates of assignment to the genus and species. See plot below and compare the Dada2 and QIIME2 classifiers. Note: both are currently using the SILVA 138 database. The current setting for the dada2 version reports has two columns, one which is via the default classifier, and the other which reports all possible species which are a perfect match (Species_ambiguous). Which method to use for your analysis depends on the questions you want to ask, I (JB) prefer reporting all possible species rather than not assigned.
+
+```{r classrates}
+read_qza("Output/ASV_q2taxonomy.qza")$data %>%
+  parse_taxonomy() %>%
+  apply(2, function(x) sum(!is.na(x))/length(x)*100) %>%
+  data.frame(Classification_Rate=.) %>%
+  rownames_to_column("Level") %>%
+  mutate(Method="Q2_classifier") %>%
+  bind_rows(
+    read_tsv("Output/ASV_d2taxonomy.txt") %>%
+    select(2:8) %>%
+    apply(2, function(x) sum(!is.na(x))/length(x)*100) %>%
+    data.frame(Classification_Rate=.) %>%
+    rownames_to_column("Level") %>%
+    mutate(Method="Dada2_classifier")
+) %>%
+  mutate(Level=factor(Level, levels=unique(Level))) %>%
+  ggplot(aes(x=Level, y=Classification_Rate, color=Method, group=Method)) +
+  geom_line() +
+  geom_point() +
+  theme_q2r() +
+  ylab("Classification Rate (%)") +
+  xlab("Taxonomic Level")
+
+ggsave("Figures/Taxonomic_Classification.pdf", device="pdf", height=3, width=4, useDingbats=F)
+
+```
+
+***
+
+# Build Phylogenetic Trees
+
+## De Novo
+
+```{bash denovo}
+source settings.txt
+if [ ! -f $PWD/Output/SVtree_denovo.qza ]; then
+  echo $(date) Building Tree denovo
+  
+  qiime phylogeny align-to-tree-mafft-fasttree \
+    --i-sequences $PWD/Output/ASV_sequences.qza \
+    --o-alignment $PWD/Intermediates/ASV_alignment.qza \
+    --o-masked-alignment $PWD/Intermediates/ASV_masked.qza \
+    --o-tree $PWD/Intermediates/ASV_unrootedtree.qza \
+    --o-rooted-tree $PWD/Output/ASV_denovotree.qza \
+    --p-n-threads $NSLOTS
+    
+else
+  echo $(date) Skipping making Tree as already complete
+fi
+```
+
+
+```{r plotdenovo}
+read_qza("Output/ASV_denovotree.qza")$data %>%
+  ggtree() %<+% read_tsv("Output/ASV_d2taxonomy.txt") +
+  geom_tippoint(aes(color=Phylum)) +
+  theme(legend.position="right")
+ggsave("Figures/Tree_DeNovo.pdf",device="pdf", useDingbats=F, height=8.5, width=11)
+```
+
+***
+
+# QC
+
+If samples were included with names matching to Extraction Controls (ExtCon), No Template Controls (NTCs), Zymo DNA controls (ZymoDNA) or Zymo Community Standard (ZymoCom). They will be analyzed here.
+
+## Positive Controls
+
+In interpretation of below, remember that there is batch to batch variation, and that the strains are not equally abundant by 16S copy number, but by genome copy number.
+
+```{r poscons}
+poscons<-read_qza("Output/ASV_table.qza")$data 
+if(sum(grepl("ZymoDNA|ZymoCom", colnames(poscons)))==0){
+  print("Skipping positive control QC")
+} else{
+  poscons[,grepl("ZymoDNA|ZymoCom", colnames(poscons))] %>% 
+    filter_features(1,1) %>%
+    as.data.frame() %>%
+    rownames_to_column("ASV") %>%
+    left_join(read_tsv("Output/ASV_d2taxonomy.txt")) %>%
+    interactive_table()
+}
+```
+
+```{r poscons2}
+poscons<-read_qza("Output/ASV_table.qza")$data 
+if(sum(grepl("ZymoDNA|ZymoCom", colnames(poscons)))==0){
+  print("Skipping positive control QC")
+} else{
+  summarize_taxa(  
+    poscons[,grepl("ZymoDNA|ZymoCom", colnames(poscons))] %>%
+      filter_features(1,1),
+      read_tsv("Output/ASV_d2taxonomy.txt") %>% 
+  column_to_rownames("ASV"))$Species %>%
+  taxa_barplot()
+}
+```
+
+## Negative Controls
+
+It is anticipated that there may be a small number of reads present in negative controls resulting from either reagent contamination, barcode hoping, or cross over. Significant contamination would be spotted during library prep.
+
+```{r negcons}
+negcons<-read_qza("Output/ASV_table.qza")$data 
+if(sum(grepl("ExtCon|NTC", colnames(negcons)))==0){
+  print("Skipping negative control QC")
+} else{
+  negcons[,grepl("ExtCon|NTC", colnames(negcons))] %>% 
+    filter_features(1,1) %>%
+    as.data.frame() %>%
+    rownames_to_column("ASV") %>%
+    left_join(read_tsv("Output/ASV_d2taxonomy.txt")) %>%
+    interactive_table()
+}
+```
+
+```{r negcons2}
+negcons<-read_qza("Output/ASV_table.qza")$data 
+if(sum(grepl("ExtCon|NTC", colnames(negcons)))==0){
+  print("Skipping negative control QC")
+} else{
+  negcons[,grepl("ExtCon|NTC", colnames(negcons))] %>% 
+    filter_features(1,1) %>%
+    as.data.frame() %>%
+    rownames_to_column("ASV") %>%
+    left_join(read_tsv("Output/ASV_d2taxonomy.txt")) %>%
+    interactive_table()
+
+  summarize_taxa(  
+    negcons[,grepl("ExtCon|NTC", colnames(negcons))] %>%
+      filter_features(1,1),
+      read_tsv("Output/ASV_d2taxonomy.txt") %>% 
+  column_to_rownames("ASV"))$Species %>%
+  taxa_barplot()
+}
+```
+
+***
+
+# Exploratory Data Analysis
+
+## PCA
+
+Note: samples with less than 5,000 reads are being filtered out before downstream analysis. Users should likely pick a higher cut off for their own analyses as expected read output is >50,000 per samples and extremely low read depth may indicate technical issues with sample.
+
+```{r pca}
+
+asv_table<-read_qza("Output/ASV_table.qza")$data
+asv_table<-asv_table[,colSums(asv_table)>5000] %>% filter_features(1,1)
+asv_table<-asv_table[,!grepl("ZymoCom|ZymoDNA|NTC|ExtCon", colnames(asv_table))] %>% filter_features(1,1)
+
+
+richness<-
+  asv_table %>%
+  subsample_table(verbose = FALSE) %>%
+  vegan::specnumber(., MARGIN=2) %>%
+  data.frame(Obs_ASVs=.) %>%
+  rownames_to_column("SampleID")
+
+pc<-
+  asv_table %>%
+  filter_features(3,3) %>%
+  make_clr() %>%
+  t() %>%
+  prcomp()
+
+exp<-(pc$sdev^2)/sum(pc$sdev^2)*100
+exp<-round(exp, 2)
+
+pc<-
+pc$x %>%
+  as.data.frame() %>%
+  rownames_to_column("SampleID") %>%
+  left_join(richness) %>%
+  ggplot(aes(x=PC1, y=PC2, label=SampleID, color=Obs_ASVs)) +
+  geom_point() +
+  theme_q2r() +
+  xlab(paste0("PC1:", exp[1],"%")) +
+  ylab(paste0("PC2:", exp[2],"%")) +
+  ggtitle("Exploratory Compositional PCA") +
+  scale_color_viridis_c()
+
+ggplotly(pc)
+
+ggsave("Figures/PCA.pdf", pc, height=5, width=5)
+```
+
+## Class Composition Bar Plot
+
+```{r phylum}
+qiime2R::taxa_barplot(
+  features=summarize_taxa(
+              features=asv_table,
+              taxonomy=read_tsv("Output/ASV_d2taxonomy.txt") %>% column_to_rownames("ASV")
+            )$Class
+)
+
+ggsave("Figures/Class_Boxplot.pdf", height=8, width=10.5)
+```
+
+## Genus Composition Heat Map
+
+```{r genuscomp}
+qiime2R::taxa_heatmap(
+  features=summarize_taxa(
+              features=asv_table,
+              taxonomy=read_tsv("Output/ASV_d2taxonomy.txt") %>% column_to_rownames("ASV")
+            )$Genus
+)
+
+ggsave("Figures/Genus_Heatmap.pdf", height=8, width=10.5)
+```
+
+
+# Clean Up
+
+Removing the Read artifacts to avoid double storage of the sequencing data and compress golay log if it exists.
+
+```{bash cleanup}
+rm Intermediates/Reads.qza
+rm Intermediates/Reads_filt.qza
+```
+
+***
+
+Pipeline complete. Additional QC may be required. See Output directory for the following files or down them embedded from within this file below.
+
+* ASV_table.qza: Your feature table
+* ASV_d2taxonomy.txt: Your taxonomy and ASV sequence information.
+* ASV_denovotree.qza: Phylogenetic trees for UniFrac/PhILR, etc.
+
+***
+
+# Processed Data Download
+
+## ASV table
+```{r}
+xfun::embed_file("Output/ASV_table.qza")
+```
+
+## ASV sequences
+```{r}
+xfun::embed_file("Output/ASV_sequences.qza")
+```
+
+## ASV Phylogenetic Tree
+```{r}
+xfun::embed_file("Output/ASV_denovotree.qza")
+```
+
+## SILVA 138 Taxonomy
+```{r}
+xfun::embed_file("Output/ASV_d2taxonomy.txt")
+```
+
+## Greengenes 2 Taxonomy
+```{r}
+xfun::embed_file("Output/ASV_q2taxonomy.qza")
+```

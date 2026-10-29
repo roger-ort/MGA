@@ -1,0 +1,9 @@
+sample-id,absolute-filepath,direction
+Bethany_Col5_A,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_A_R1_001.fastq.gz,forward
+Bethany_Col5_A,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_A_R2_001.fastq.gz,reverse
+Bethany_Col5_B,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_B_R1_001.fastq.gz,forward
+Bethany_Col5_B,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_B_R2_001.fastq.gz,reverse
+Bethany_Col5_C,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_C_R1_001.fastq.gz,forward
+Bethany_Col5_C,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_C_R2_001.fastq.gz,reverse
+Bethany_Col5_D,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_D_R1_001.fastq.gz,forward
+Bethany_Col5_D,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_D_R2_001.fastq.gz,reverse

@@ -1,0 +1,15 @@
+export TemplateXLSX=Amplicon13_RunTemplate_18Nov2025.xlsx
+export Project=Macalady9|Controls
+export ReadDir=Reads_forSRA
+export TrimAdapters=true
+export Fprimer=^GTGYCAGCMGCCGCGGTAA
+export Rprimer=^GGACTACNVGGGTWTCTAAT
+export TruncF=220
+export TruncR=150
+export TrimL=0
+export TrimR=0
+export Suffix=_S[0-9]{1,3}_R[0-9]_001
+export MinSVLen=250
+export MaxSVLen=255
+export ExportTrimmedReads=true
+export NSLOTS=1

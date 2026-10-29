@@ -1,0 +1,9 @@
+sample-id,filename,direction
+Bethany_Col5_A,Bethany_Col5_A_0_L001_R1_001.fastq.gz,forward
+Bethany_Col5_A,Bethany_Col5_A_1_L001_R2_001.fastq.gz,reverse
+Bethany_Col5_B,Bethany_Col5_B_2_L001_R1_001.fastq.gz,forward
+Bethany_Col5_B,Bethany_Col5_B_3_L001_R2_001.fastq.gz,reverse
+Bethany_Col5_C,Bethany_Col5_C_4_L001_R1_001.fastq.gz,forward
+Bethany_Col5_C,Bethany_Col5_C_5_L001_R2_001.fastq.gz,reverse
+Bethany_Col5_D,Bethany_Col5_D_6_L001_R1_001.fastq.gz,forward
+Bethany_Col5_D,Bethany_Col5_D_7_L001_R2_001.fastq.gz,reverse

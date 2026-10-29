@@ -1,0 +1,5 @@
+Sample_ID,Sample_Plate,Sample_Well,Project,Forward_Read,Reverse_Read
+Bethany_Col5_A,Plate1,A1,Macalady9|Controls,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_A_R1_001.fastq.gz,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_A_R2_001.fastq.gz
+Bethany_Col5_B,Plate1,B1,Macalady9|Controls,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_B_R1_001.fastq.gz,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_B_R2_001.fastq.gz
+Bethany_Col5_C,Plate1,C1,Macalady9|Controls,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_C_R1_001.fastq.gz,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_C_R2_001.fastq.gz
+Bethany_Col5_D,Plate1,D1,Macalady9|Controls,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_D_R1_001.fastq.gz,/root/qiime2-MacaladyControls/Reads_forSRA/Bethany_Col5_D_R2_001.fastq.gz

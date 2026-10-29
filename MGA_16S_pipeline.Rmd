@@ -1,0 +1,3846 @@
+---
+title: "MGA_16S_pipeline"
+output: html_document
+date: "2025-04-04"
+---
+
+```{=html}
+<style type="text/css"> .main-container {   max-width: 1000px;  margin-left: 0;   margin-right: auto; } </style> 
+```
+
+# █ Mini Gradient Array 16S Pipeline
+
+This document and the code within depends on QIIME2 (.qza) files which need to be generated in a QIIME2 miniconda environment outside of R before R processing can occur. The below code merges sets of premade .qza files.
+
+```         
+conda update conda
+conda activate qiime2-amplicon-2024.10
+cd qiime2-MGA
+qiime feature-table merge  --i-tables *table.qza --o-merged-table MergeTable.qza  --p-overlap-method sum
+qiime feature-table merge-seqs --i-data *sequences.qza --o-merged-data MergeSeqs.qza
+qiime feature-table merge-taxa --i-data *q2taxonomy.qza --o-merged-data MergeTaxa.qza
+?????????????????
+qiime feature-table merge-taxa --i-data *denovotree.qza --o-merged-data MergeTree.qza
+```
+
+## Install Packages
+
+Install prerequisite packages. This is set up to not automatically run. Highlight the entire code block and use Cntrl + Shift + C to uncomment and run.
+
+```{r setup, message=FALSE}
+Sys.setenv(LANGUAGE = "en") #Set system to english -- if your system locale is set to something else (e.g. mine was in Japanese) then R will throw errors at you.
+
+# install.packages("ggplot2")
+# install.packages("readxl")
+# install.packages("tidyverse")
+# install.packages("vegan")
+# install.packages("svglite")
+# install.packages("plotly")
+# install.packages("multcompView")
+# install.packages("ggh4x")
+# install.packages("gsl", type="source")
+# 
+# if (!requireNamespace("devtools", quietly = TRUE)){install.packages("devtools")}
+#   devtools::install_github("jbisanz/qiime2R") # current version is 0.99.20
+# 
+# if (!require("BiocManager", quietly = TRUE))
+#   install.packages("BiocManager")
+# BiocManager::install("dada2")
+# BiocManager::install("ANCOMBC")
+# BiocManager::install("phyloseq")
+#BiocManager::install("microbiome")
+
+```
+
+## Load Libraries
+
+Load necessary libraries and set the working directory.
+
+```{r warning=FALSE, message=FALSE}
+
+library(ggplot2) #We know and love her
+library(qiime2R) #qiime to R package
+library(dada2) #Classifying ASVs
+library(readxl) #For reading excel files
+library(tidyverse) #For multiple things, but also %>% pipes
+library(vegan) #For "diversity", "adonis2"
+library(svglite) #For saving file as svg (graph/figure)
+library(plotly) #For making ggplots into interactive html figures
+library(multcompView) #For significant letters/tukey
+library(ggh4x) #For facet-wrapping violin/box plots
+library(ANCOMBC)
+library(gsl)
+library(phyloseq)
+library(htmlwidgets)
+library(ALDEx2)
+library(patchwork)
+library(microbiome)
+library(ggplot2)
+library(patchwork)
+library(ANCOMBC)
+library(DT) #Need to load this for formatRound()
+library(ggpubr)
+
+# sessionInfo()
+
+# The RMD file must be in this folder
+setwd("C:/Users/runet/Documents/WORK/Labwork/2024 MGA")
+
+```
+
+## Set Color schema
+
+In order to streamline graph creation, variable colors can be set here.
+
+```{r}
+
+mgacolors<-c(
+
+  GL_034 = "#52C425",   
+  GL_039 = "#52C425",
+  GL_045 = "#52C425",
+  GL_087 = "#0D780B",
+  BR_090 = "#e1471c",
+  BR_273 = "#521318",
+  GL_56_M = "#fe522e",
+  GL_118_M = "#c72c0e",
+  GL_146_M = "#791500",
+  GL_56_TS = "#4fb9ff", 
+  GL_118_TS = "#2285c9",
+  GL_146_TS = "#064b79",
+  GL_29_I = "#ffa800",
+  GL_Filter = "#89d814",
+  
+  "56 M" = "#fe522e",
+  "118 M" = "#c72c0e",
+  "146 M" = "#791500",
+  "56 TS" = "#4fb9ff", 
+  "118 TS" = "#2285c9",
+  "146 TS" = "#064b79",
+
+  
+  iChip = "#ffa800",
+  Filter = "#89d814",
+  MGA = "#ad4b9c",
+  
+
+  #Color by substrate
+  Acetate = "#d5162c",    
+  Blank = "#959595",
+  S0 = "#ffa800",
+  Formate = "#ff7746",
+  Glucose = "#8450bf",
+  Glycerol = "#339861",
+  Propionate = "#2d6cd9",
+  Pyruvate = "#b5da2e",
+  
+  #Color by construction
+  
+  I = "#ffa800",
+  F = "#89d814",
+  M = "#c72c0e",
+  TS = "#2285c9",
+  Middle = "#c72c0e",
+  TopSeal = "#2285c9"
+  )
+
+#Color gradient for continuous variable
+contcolors<-c(
+  GL_034 = "#c0fc90",   
+  GL_039 = "#b6f77e")
+
+
+#qiime2R palette
+q2r_palette<-c("#0072b2","#009e73","#d55e00","#f0e442","#cc79a7","#56b4e9","#8ae654","#7ddfda","#e69f00","#d17949","#bebebe")
+
+
+cyberskittles<-c("#ffca3a","#ff595e","#ff924c","#8ac926","#36949d","#199350","#4267ac","#1982c4","#6a4c93","#cc4b2e","#bebebe")
+
+
+
+```
+
+## Define Functions
+
+Defines the following reusable functions:
+
+`%notin%`, which creates the opposite of `%in%`
+
+`getDist`, which subsets and obtains a distance matrix from an ASV table given an already-subset metadata file.
+
+`doPCA`, which performs a PCA given an asv_table and subset metadata.
+
+`graphPCA`, which graphs a PCA with ggplot, given the results of a `doPCA`. Group, Color, and Shape should be variables representing columns in the metadata. Title is a string (in quotes) containing the desired graph title. Datatype needs to be set to "manual" or "continuous" depending on what kind of variable you are hoping to plot.
+
+```{r}
+
+#Create 'notin' operator
+`%notin%` <- function(x,y) !(x %in% y)
+
+getDist <- function(asv_table,metaSet){
+  
+  #subset asv table according to how you subset meta earlier
+  asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% row.names(metaSet)))
+  
+  #Distance Matrix
+  dist<- asvSet + 0.5 # THIS IS THE PSEUDOCOUNT THAT MAKE_CLR USES
+  perm_dist<-vegdist(dist, method='aitchison')
+  
+  return(perm_dist)
+}
+
+doPCA<-function(asv_table,metaSet,level){
+  
+  asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% row.names(metaSet)))
+  pc<- asvSet %>% t() %>% make_clr() %>%t() %>% prcomp() #Use only with unrarified data (makes log-center transform)
+
+  pca<- as.data.frame(pc$x) %>% rownames_to_column("NewName") 
+  names<-as.data.frame(pca$NewName)
+  exp<-(pc$sdev^2)/sum(pc$sdev^2)*100
+  exp<-round(exp, 2)
+  scores <- data.frame(pc$x[, 1:5]) #this gives me the right scores for the PCA
+  colnames(scores) <- colnames(data.frame(pc$x[, 1:5]))
+  scores[] <- lapply(scores, function(x) x / sqrt(sum((x - mean(x))^2))) #makes them small
+  loadings <- as.data.frame(pc$rotation)[1:5]
+  scale <- min(max(abs(scores$PC1))/max(abs(loadings$PC1)),
+               max(abs(scores$PC2))/max(abs(loadings$PC2))) * 0.8
+  
+#Calculate the length of each loading
+  loadinglength<-loadings
+  loadinglength$dist <- sqrt(loadings$PC1^2 + loadings$PC2^2)
+  rownames(loadinglength) <- rownames(loadings)
+  loadinglength$Feature.ID <- rownames(loadings)
+  
+#Order from biggest to smallest
+  loadinglength$rank <- rank(-loadinglength$dist) #Rank from largest to smallest...
+  loadinglength<- loadinglength[order(loadinglength$rank), ] #Now order them that way
+  loadinglength <-  loadinglength[1:10, ]    # SUBSAMPLE however many top hits you wanna look at!
+  
+#Now we have to ID who is who
+  loadinglength_taxa <- left_join(loadinglength, taxa, by = "Feature.ID")
+  loadinglength_taxa_loadings<- loadinglength_taxa[, c(1, 2)]
+  loadinglength_taxa<-parse_taxonomy(loadinglength_taxa) #Parse the taxonomy so the table isnt 1 billion years long
+  
+#Return a list object that contains a bunch of useful graphing information
+  return(list(names=names, scores=scores,exp=exp,loadings=loadinglength_taxa_loadings,taxa=loadinglength_taxa,scale=scale))
+  
+}
+
+```
+
+
+# █ Import, filter, and classify ASVs
+
+## DADA2 Feature Classification
+
+Generates ASV_d2taxonomy.txt text file; checks to see if this file has already been generated, and doesn't re-run if the file is found. This file matches all ASVs to taxonomic units. Code originally taken from Jordan Bisanz 16S pipeline.
+
+```{r, echo=FALSE}
+# generates taxonomy which is used later in the bar chart...
+
+# READ ASV SEQUENCES IN
+ASV_seq<-read_qza("qiime merge/MergeSeqs.qza")$data
+
+if(!file.exists("qiime merge/ASV_d2taxonomy.txt")){
+  message(date(), " Assigning taxonomy with dada2")
+  
+  #seqs<-read_qza("qiime merge/MergeSeqs.qza")$data
+  taxonomy <- assignTaxonomy(as.character(ASV_seq), "silva_nr99_v138.1_wSpecies_train_set.fa.gz", multithread=as.integer(8))
+  taxonomy <- addSpecies(taxonomy, "silva_species_assignment_v138.1.fa.gz", allowMultiple=TRUE)
+  colnames(taxonomy)[8]<-"Species_ambiguous"
+ 
+  as.data.frame(taxonomy) %>%
+    rownames_to_column("Sequence") %>%
+    left_join(tibble(ASV=names(ASV_seq), Sequence=as.character(ASV_seq))) %>%
+    dplyr::select(ASV, Kingdom, Phylum, Class, Order, Family, Genus, Species, Species_ambiguous, Sequence) %>%
+    write_tsv("qiime merge/ASV_d2taxonomy.txt")
+  
+} else {
+  message(date(), " Skipping Dada2 taxonomy as already complete")
+}
+
+taxonomy<-read_tsv("qiime merge/ASV_d2taxonomy.txt")
+
+```
+
+## Filter ASV Table
+
+The ASV table contains all samples in the dataset (columns) and corresponding frequency/amount of ASVs (rows). This dataset is full of 0's and needs to be significantly trimmed. Here we read in the data (ASV table and taxonomy) and trim the table.
+
+```{r message=FALSE}
+
+
+# Read taxonomy (from qiime) and metadata in
+taxa<-read_qza("qiime merge/MergeTaxa.qza")
+taxa <- taxa[["data"]]
+metadata<-read_excel("Macalady_Metadata_Sumtable.xlsx")  
+
+asv_table<-read_qza("qiime merge/MergeTable.qza")$data # Create main asv_table object
+asv_untrim <- asv_table # Save untrimmed version of the ASV table in case we need it later
+
+# Filter Sequencing controls
+asv_table<-asv_table[,!grepl("ZymoCom|ZymoDNA|NTC|ExtCon", colnames(asv_table))] %>% filter_features(1,1)
+
+#filtering samples ***MAJOR filter STEP***
+# present in 2 samples, at least 5 reads
+asv_table<-asv_table[,colSums(asv_table)>5] %>% filter_features(2,5)
+#asv_table<-asv_table[,colSums(asv_table)>5] %>% filter_features(20,500)
+
+# At this step, grab total reads from the ASV table for later
+reads<-as.data.frame(colSums(asv_table)) #Grab number of total reads per sample
+colnames(reads) <-"reads" #Rename 
+
+### Export CSV for Viewing
+#Assign taxonomy to the ASV table; export a trimmed version of this with appropriate sample names as an .csv. This will be useful to look at later in excel.
+
+asv_table<-as.data.frame(asv_table)
+asv_table_taxa<-asv_table
+featureID<-as.data.frame(rownames(asv_table_taxa))
+asv_table_taxa$FeatureID <- taxa$Taxon[match(rownames(asv_table_taxa), taxa$Feature.ID)]
+write.csv(asv_table_taxa, "asv_table_taxa.csv")
+
+rm(asv_table_taxa,featureID)
+```
+
+
+## Merge control samples
+
+These were processed separately with an identical pipeline and now will be merged into the ASV table. No samples survive the pipeline, so this code throws an error. There is nothing to merge.
+
+```{r}
+
+taxonomyControl <- read_tsv("//wsl.localhost/Ubuntu/root/qiime2-MacaladyControls/Output/ASV_d2taxonomy.txt")
+
+# Read control taxonomy (from qiime) and metadata in
+#taxa<-read_qza("qiime merge/MergeTaxa.qza")
+#taxa <- taxa[["data"]]
+
+asv_tableControl<-read_qza("//wsl.localhost/Ubuntu/root/qiime2-MacaladyControls/Output/ASV_table.qza")$data # Create main asv_table object
+asv_untrimC <- asv_tableControl # Save untrimmed version of the ASV table in case we need it later
+asv_tableControl<-as.data.frame(t(asv_tableControl))
+rownames(asv_tableControl)[1:3] <- paste0("labcontrol_",1:3)
+asv_tableControl<-t(asv_tableControl)
+
+# Filter Sequencing controls
+asv_tableControl<-asv_tableControl[,!grepl("ZymoCom|ZymoDNA|NTC|ExtCon", colnames(asv_tableControl))] %>% filter_features(1,1)
+
+#filtering samples ***MAJOR filter STEP***
+# present in 2 samples, at least 5 reads
+asv_tableControl<-as.data.frame(asv_tableControl)
+
+#This command throws error because no samples survive it. ##############
+#asv_tableControl<-asv_tableControl[,colSums(asv_tableControl)>5] %>% filter_features(2,3)
+
+# Lab controls work as negative controls
+
+# Remove objects:
+rm(taxonomyControl, asv_untrimC, asv_tableControl)
+
+```
+
+
+## Calculate Diversity Metrics
+
+In order to calculate diversity metrics for the ASV table, we first have to take a transposed replicate of asv_table to work with so things come out by sample and not by OTU. Then we can calculate a new metadata file that contains alpha diversity metrics and then join that to the original metadata file.
+
+```{r}
+
+asv_table<-as.data.frame(t(asv_table))
+
+reads <- reads[match(rownames(asv_table),rownames(reads)),,drop=FALSE]
+
+# Calculate Diversity Metrics
+meta_alpha <- cbind(as.data.frame(vegan::diversity(asv_table, index = "shannon", equalize.groups = FALSE, MARGIN = 1, base = exp(1))) , 
+              as.data.frame(simpson.unb(asv_table, inverse = FALSE)), 
+              as.data.frame(fisher.alpha(asv_table, MARGIN = 1)), 
+              as.data.frame(specnumber(asv_table, MARGIN = 1)),
+              as.data.frame(reads))
+colnames(meta_alpha) <- c("shannon", "simpson", "fisher a", "species", "reads")
+
+#I want pielou's evenness number as well so I can just see evenness...
+meta_alpha$pielouJ <- meta_alpha$shannon / log(meta_alpha$species)
+
+#write.csv(meta_alpha, "meta_alpha.csv") #save a csv to look at later, optional
+rm(reads)
+
+#Join `metadata` dataframe at this step, based on **only which samples have been retained due to filtering** as represented in the `meta` dataframe, which has just been derived from the `asv_table`
+metadata <- as.data.frame(metadata) #For some reason it isn't already a data table, and breaks the merge...
+rownames(metadata) <- metadata$SampleID #Rename metadata rows
+meta <- merge(meta_alpha, metadata, by=0, all.x=TRUE) #Add metadata to meta
+rownames(meta) <- meta$NewName #Rename the rows with the new standard sample names
+
+#rownames(meta) <- make.names(meta$NewName, unique = TRUE) #Do not try "makenames"
+rownames(asv_table) <- meta$NewName #Now rename the asv_table too
+#Everything should now be compatible.
+rm(meta_alpha) #Don't need it anymore
+
+#Clean up meta a little bit
+meta$Row.names<- NULL
+meta$Sample<- NULL
+meta$SampleAmpliconTutorialFilter<-NULL
+
+#Remove ECB / extraction control blanks
+meta <- subset(meta, Type != "ECB") 
+meta <- subset(meta, Construction != "ECB") 
+
+```
+
+## Filter dataset and set factor order
+
+The MGA prototype testing dataset contains some samples that we are not using in this pipeline. Here, we filter those samples out of the dataset.
+
+Set levels for factor order in the original metadata so that everything plots in the same visual order and with the intended shortened group name.
+
+Clean up metadata.
+
+```{r}
+
+
+#Filter out unwanted sample types
+meta <- meta %>% subset(Location != "BR" & Construction != "TO" & AlphaType != "Lab Control")
+#Make sure that asv_table matches post-filtering
+asv_table <- as.data.frame(subset(asv_table, row.names(asv_table) %in% row.names(meta)))
+
+# Future filter method will look like this:
+metaSet <- meta
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% row.names(metaSet)))
+
+#Set factor levels
+meta$GroupID <- as.character(meta$GroupID)
+#meta["labcontrol_1", "GroupID"] <- "Lab Control"
+meta$GroupID[meta$GroupID == "GL_Filter"] <- "Filter"
+meta$GroupID[meta$GroupID == "GL_29_I"] <- "iChip"
+meta$GroupID[meta$GroupID == "GL_56_M"] <- "56 M"
+meta$GroupID[meta$GroupID == "GL_118_M"] <- "118 M"
+meta$GroupID[meta$GroupID == "GL_146_M"] <- "146 M"
+meta$GroupID[meta$GroupID == "GL_56_TS"] <- "56 TS"
+meta$GroupID[meta$GroupID == "GL_118_TS"] <- "118 TS"
+meta$GroupID[meta$GroupID == "GL_146_TS"] <- "146 TS"
+meta$GroupID <- factor(meta$GroupID,
+  levels = c("Lab Control", "Filter", "iChip", "56 M", "118 M", "146 M", "56 TS", "118 TS", "146 TS")
+)
+
+
+# Rename "none" as "Blank" <- this was a metadata error
+meta$OrgSub[meta$OrgSub == "None"] <- "Blank"
+```
+
+
+# █ Putitative SRB list with PICRUST2
+
+
+Reset asvSet
+
+```{r}
+
+#Filter out iChip from MGA + Filter
+metaSet<-meta
+
+#Edit asv_table to reflect subset
+asvSet<-as.data.frame(subset(asv_table, row.names(asv_table) %in% metaSet$NewName))
+metaSet<-as.data.frame(subset(metaSet, metaSet$NewName %in% row.names(asvSet)))
+rownames(metaSet)<-metaSet$NewName
+
+```
+
+
+## 1. "Desulfo"
+
+```{r}
+# Match samples
+asvSet <- asvSet[rownames(metaSet), ]
+
+# OPTIONAL: sulfate reducers only
+# Find ASVs where any taxonomy field contains "Desul"
+desul_asvs <- taxa %>% filter(if_any(everything(), ~ grepl("Desul", ., ignore.case = TRUE)))
+desul_asvs2<-parse_taxonomy(desul_asvs)
+desul_asvs2$ASV<-desul_asvs$Feature.ID
+write.csv(desul_asvs2, "desul_asvs.csv", row.names=FALSE)
+
+#Import manually annotated xlsx file. Taxonomy selected for inclusion are designated "TRUE" in 
+desul_asvs_annotated<-read_csv("desul_asvs_annotated.csv")  
+
+#Filter only TRUE ASVs
+desul_asvs_annotated <- desul_asvs_annotated %>% filter(SRB == TRUE)
+
+#Add this list of ASVS to the list of "desulfo" ASVs
+putitativeSRB <- desul_asvs_annotated$ASV
+putitativeSRB <- unique(c(putitativeSRB,desul_asvs_annotated))
+
+```
+
+## 2. Manually-checked PICRUSt
+
+Following this tutorial: <https://shibalytics.com/teaching/16s/microbiome_analysis_part_v>
+First, make a phyloseq object out of the filtered dataset. If you are NOT rerunning Picrust, you do not have to do this.
+
+```{r}
+
+#trim "taxa" to reflect trimmed metadata + asv table
+taxa_trim <- subset(taxa, taxa$Feature.ID %in% rownames(t(asvSet)))
+rownames(taxa_trim)<-taxa_trim$Feature.ID
+taxa_trim<-parse_taxonomy(taxa_trim)
+
+#Create a new phyloseq object
+phyloseq <- phyloseq( sample_data(metaSet), tax_table(as.matrix(taxa_trim)),
+                    otu_table(asvSet, taxa_are_rows = FALSE))
+
+phyloseq
+```
+
+Load R packages used in the tutorial. If you are NOT rerunning Picrust, you do not have to do this.
+
+```{r warning=FALSE}
+
+# install.packages("picante")
+# install.packages("kableExtra")
+# install.packages("reticulate")
+
+suppressMessages({
+        library("tidyverse")
+        library("phyloseq")
+        library("rstatix")
+        library("vegan")
+        library("picante")
+        library("kableExtra")
+        library("reticulate")
+        library("ALDEx2")
+        library("data.table")
+})
+no_of_cores = 1
+
+## useful functions for generating PICRUSt2 input
+
+#---- phyloseq_counts_to_df
+# Converts phyloseq into a data frame which can be used to export the
+# ASVs and samples with their counts to a file. This function also
+# adds a new column with the ASV IDs to the front.
+phyloseq_counts_to_df <- function(ps) {
+  df <- as.data.frame(t(otu_table(ps)))
+  df <- cbind("#OTU ID" = rownames(df), df)  # Cheeky way to add a comment to first line
+
+  # Note: we use OTU ID above since at the moment this function is meanly used
+  # to pipe files into picrust, which needs the 'OTU ID'.
+  return(df)
+}
+
+
+#---- write_counts_to_file
+# Write the (raw) counts from a phyloseq object as a data matrix to file.
+#
+# INPUT  ps           : phyloseq object
+#        file_name    : full file name (incl. path if required when not writing
+#                       to working directory)
+
+write_counts_to_file <- function(ps, filename) {
+  df <- phyloseq_counts_to_df(ps)
+
+  write.table(df, file=filename,
+sep = "\t",
+              row.names = FALSE)
+}
+
+#---- write_seqs_to_file
+# Write the sequences from a phyloseq object as a fasta file.
+#
+# INPUT  ps           : phyloseq object
+#        filename    : full file name (incl. path if required when not writing
+#                       to working directory)
+write_seqs_to_file <- function(ps, filename) {
+  df <- as.data.frame(refseq(ps))
+
+  unlink(filename)  # make sure we delete before we concatenate below
+
+  names <- rownames(df)
+  for (i in 1:nrow(df)) {
+    cat(paste0(">", names[i]), file=filename, sep="\n", append=TRUE)
+    cat(df[i,1], file=filename, sep="\n", append=TRUE)
+  }
+  message(paste0("Wrote ", nrow(df), " ASV sequences to file ", filename))
+}
+```
+
+If you are NOT rerunning Picrust, you do not have to do this.
+
+```{r}
+
+# Prepare phyloseq file, join DNAStringset
+
+ls()
+
+ps <- phyloseq
+ps <- merge_phyloseq(ps, refseq(ASV_seq))
+
+#ps has already been filtered -- create directory and write counts to files.
+dir.create("picrust2", showWarnings = FALSE)
+write_counts_to_file(ps, filename = "picrust2/raw_counts.tsv")
+write_seqs_to_file(ps, filename = "picrust2/seqs.fna")
+
+# Generate these, transfer to psu ROAR computer
+```
+
+These next steps occur in Ubuntu, not in R. If you are NOT rerunning Picrust, you do not have to do this.
+
+```{}
+
+# Now install picrust in Ubuntu/conda qiime environment
+
+conda create -n picrust2 -c conda-forge -c bioconda picrust2
+conda activate picrust2
+picrust2_pipeline.py --help
+gz
+
+# Use an extra cd to go to your work directory (not shown)
+# already exists, i made it earlier and put files in it
+mkdir -p picruzst2; cd picrust2
+
+rm -Rf results # delete the results directory if it already exists
+               
+# otherwise picrust2 will stop (safety feature)
+
+picrust2_pipeline.py -s seqs.fna -i raw_counts.tsv -p 2 -o results --stratified --verbose
+
+# Then add descriptions. These are needed to actually be able to tell what functions have been predicted
+
+cd ./picrust2/results && add_descriptions.py -i EC_metagenome_out/pred_metagenome_unstrat.tsv.gz -m EC -o EC_metagenome_out/pred_metagenome_unstrat_descrip.tsv.gz && add_descriptions.py -i KO_metagenome_out/pred_metagenome_unstrat.tsv.gz -m KO -o KO_metagenome_out/pred_metagenome_unstrat_descrip.tsv.gz && add_descriptions.py -i pathways_out/path_abun_unstrat.tsv.gz -m METACYC -o pathways_out/path_abun_unstrat_descrip.tsv.gz && find . -name '*desc*.gz' -exec gunzip -dfv {} \;
+
+# Downloaded from ROAR cluster and manually renamed
+
+#The main output of PICRUSt2 is the tsv file within EC_metagenome_out, KO_metagenome_out, and #pathways_out folders. Copy those tsv files to your own working directory. Be sure to change their #names (EC.tsv, KO.tsv, and path.tsv, respectively), as some files share the same name. You can do #this manually, or use the quick system commands below.
+
+```
+
+Here is where you can start rerunning the pipeline again if you are electing to not rerun Picrust.
+
+```{r}
+
+# Prepare the KO output
+
+p2_KO = ("C:/Users/runet/Documents/WORK/Labwork/2024 MGA/picrust2/results/KO.tsv")
+p2KO = as.data.frame(fread(p2_KO))
+rownames(p2KO) = p2KO$"function"
+p2KO = p2KO %>%
+        mutate(across(-c(`function`,description), round ))
+p2KO = as.matrix(p2KO[,-1])
+```
+
+I'm only interested in seeing which ASVs are assigned sulfate-reducing functions... begin manual searching for sulfite reductase, or dissimilatory sulfate reduction.
+
+Sulfate reduction involves some of the following pathways.
+
+GENE    KO        EC
+  SO42- to SO32- =======================
+    dissimilatory sulfite reductase
+      dsrA    K11180    [EC:1.8.1.22]
+      dsrB    K11181    [EC:1.8.1.22]
+
+  SO32- to HS-   =======================
+    sulfate adenylyltransferase
+      Sat     K00958    [EC:2.7.7.4]
+    adenylylsulfate reductase
+      AprB    K00395    [EC:1.8.99.2]
+      AprA    K00394    [EC:1.8.99.2]
+    quinone-modifying oxidoreductase
+      QmoA    K16885
+      QmoB    K16886
+      QmoC    K16887
+     
+We'll look for ASVs that have dsrAB (either), aprAB (both), and sat
+
+I also want the KO information (KEGG ortholog) by ASV / sequence is in combined_KO_predicted.tsv
+
+```{r}
+
+ko_pred <- fread("C:/Users/runet/Documents/WORK/Labwork/2024 MGA/picrust2/results/combined_KO_predicted.tsv")
+
+ko_pred <- as.data.frame(ko_pred)
+p2KO <- as.data.frame(p2KO)
+
+# Match KO IDs to descriptions
+ko_descriptions <- p2KO$description
+names(ko_descriptions) <- rownames(p2KO)
+
+ko_annotation <- data.frame(func = colnames(ko_pred),description = ko_descriptions[colnames(ko_pred)])
+
+# Manual list of KOs I'm interested in
+my_KOs <- c(
+    "ko:K11180", #dsrA
+    "ko:K11181", #dsrB
+    "ko:K00958", #Sat
+    "ko:K00395", #AprB
+    "ko:K00394") #AprA
+
+# Find which KOs actually exist in ko_pred
+KOs_found <- intersect(my_KOs, colnames(ko_pred))
+
+# Select ASVs having >0 predicted copies for
+# at least one of the KOs
+asv_has_KO <- rowSums(ko_pred[, KOs_found, drop = FALSE] > 0,na.rm = TRUE) > 0
+
+# Get ASV IDs
+selected_asvs <- rownames(ko_pred)[asv_has_KO]
+
+# Get taxonomy for selected ASVs
+taxonomy_selected <- taxonomy[selected_asvs,,drop = FALSE]
+
+# Add TRUE/FALSE columns for each KO
+KO_matches <- ko_pred[selected_asvs,KOs_found,drop = FALSE] > 0
+# Combine taxonomy + KO matches
+taxonomy_selected <- cbind(taxonomy_selected,KO_matches)
+
+#keep when *either* dsr A or dsr B are present, and aprA, aprB, and sat are all present. 
+taxonomy_selected <- taxonomy_selected %>% filter((`ko:K11180` | `ko:K11181`) & `ko:K00395` & `ko:K00394` & `ko:K00958`)
+
+#Export for manual checking
+write.csv(taxonomy_selected, "taxonomy_selected.csv", row.names = TRUE)
+
+#Import manually annotated xlsx file. Taxonomy selected for inclusion are designated "TRUE" in 
+taxonomy_selected_filtered<-read_excel("taxonomy_selected_annotated.xlsx")  
+
+#Filter only TRUE ASVs
+taxonomy_selected_filtered <- taxonomy_selected_filtered %>% filter(taxonomy_selected_filtered$INCLUSION)
+
+#If you are running the pipeline out of order, use this line to generate "tax_label" if needed
+#taxonomy$tax_label <- apply(taxonomy[, c("Kingdom","Phylum","Class","Order","Family","Genus","Species")], 1, function(x) paste(tail(x[!is.na(x) & x != ""], 2), collapse = " "))
+
+#Optional, use filtered list to pick up ASVs that may have been lost in PICRUSt pipeline by taxonomic proximity -- match names and pull any ASVs with identical taxonomy to included taxa from PICRUSt output
+taxonomy_selected_filtered_expanded <- semi_join(taxonomy, taxonomy_selected_filtered, by = "tax_label")
+
+#Add this list of ASVS to the list of "desulfo" ASVs
+putitativeSRB2 <- taxonomy_selected_filtered$ASV
+putitativeSRB <- unique(c(putitativeSRB,putitativeSRB2))
+
+```
+
+Remove unneeded objects. We want to keep PutitativeSRB a result of this pipeline.
+
+```{r warning=FALSE}
+
+
+rm(asvPicrust,cld,Compare,contr,contr_dfemm,srbplot,ko_annotation,KO_matches,ko_pred,p2KO,phyloseq,ps,taxonomy_selected,taxonomy_selected_filtered, taxonomy_selected_filtered_expanded, taxonomy_selected2)
+
+#Export PutativeSRB
+write.csv(putitativeSRB, "pSRB.csv", row.names = TRUE)
+
+```
+
+
+# █ Ordination (Beta Diversity)
+
+## PCAs 
+
+Generate a PCA from a log-center transformed ASV table with Euclidean distance, where Mini Gradient Array data is grouped by construction, and MGA, iChip, and Filter (GL) points are all plotted.
+
+Note that a log-center transformed (inherently Euclidean) PCA is mathematically identical to a PCoA with Euclidean distance.
+
+PCA was chosen for analysis as recommended by Gloor et al 2017:
+
+Gloor GB, Macklaim JM, Pawlowsky-Glahn V and Egozcue JJ (2017) Microbiome Datasets Are Compositional: And This Is Not Optional. Front. Microbiol. 8:2224. doi: 10.3389/fmicb.2017.02224
+
+```{r, warning=FALSE}
+
+metaSet <- meta
+PCAset <- doPCA(asv_table, metaSet)
+
+scores_df1 <- PCAset$scores %>%
+  mutate(GroupVar = metaSet$AlphaType, Construction = metaSet$Construction, HoverText = paste("Sample:", rownames(PCAset$scores)))
+
+p <- ggplot(scores_df1, aes(PC1, PC2)) +
+  stat_ellipse(aes(group = GroupVar, fill = GroupVar, colour = GroupVar), geom = "polygon", alpha = 0.05, type = "norm", level = 0.90) +
+  stat_ellipse(aes(group = GroupVar, colour = GroupVar), type = "norm", level = 0.90, linetype = "dotted") +
+  geom_point(aes(colour = Construction, fill = Construction, shape = Construction), size = 2) +
+  scale_colour_manual(values = mgacolors) +
+  scale_fill_manual(values = mgacolors) +
+  scale_shape_manual(values = c(MGA = 16, M = 16, TS = 17, F = 15, I = 18)) +
+  coord_cartesian(xlim = c(-0.05, 0.35)) +
+  labs(title = "Green Lake and In-situ Device Community Composition", subtitle = "a)", x = paste0("PC1: ", PCAset$exp[1], "%"), y = paste0("PC2: ", PCAset$exp[2], "%")) +
+  theme_q2r() +
+  theme(legend.position = "none", plot.title = element_text(size = 12, face = "bold"), plot.subtitle = element_text(size = 10))
+
+p
+
+# Save plot
+# ggsave(file = "PCA_newskinny.svg", device=svg, plot = p,width=3,height=5)
+
+# ggplotly(p, tooltip = c("text")) %>%
+  #style(hoverinfo = "skip", traces = c(1,2)) 
+
+```
+
+Zoom in on only MGA points, grouped this time by individual array and with 95% confidence ellipses.
+
+```{r, warning=FALSE}
+metaSet2 <- meta %>% subset(!Construction %in% c("F", "I"))
+PCAset2 <- doPCA(asv_table, metaSet2)
+
+scores_df2 <- PCAset2$scores %>%
+  mutate(GroupID = metaSet2$GroupID, Construction = metaSet2$Construction, HoverText = paste("Sample:", rownames(PCAset2$scores)))
+
+loadings_df <- as.data.frame(PCAset2$loadings * PCAset2$scale) %>%
+  mutate(Genus = PCAset2$taxa$Genus, Species = PCAset2$taxa$Species, HoverText = paste("Phylum:", PCAset2$taxa$Phylum, "<br>Order:", PCAset2$taxa$Order, "<br>Family:", PCAset2$taxa$Family, "<br>Genus:", PCAset2$taxa$Genus, "<br>Species:", PCAset2$taxa$Species))
+
+p2 <- ggplot(scores_df2, aes(PC1, PC2)) +
+  stat_ellipse(aes(group = GroupID, colour = GroupID, fill = GroupID), geom = "polygon", alpha = 0.05, type = "norm", level = 0.90) +
+  stat_ellipse(aes(group = GroupID, colour = GroupID), type = "norm", level = 0.90, linetype = "dotted") +
+  geom_point(aes(colour = GroupID, fill = GroupID, shape = Construction), size = 2) +
+  geom_segment(data = loadings_df, aes(x = 0, y = 0, xend = PC1, yend = PC2), inherit.aes = FALSE, colour = "black", alpha = 0.7) +
+  geom_point(data = loadings_df, aes(PC1, PC2), inherit.aes = FALSE, size = 2) +
+  geom_text(data = loadings_df, aes(PC1, PC2, label = Genus), inherit.aes = FALSE, nudge_y = -0.005) +
+  scale_colour_manual(values = mgacolors) +
+  scale_fill_manual(values = mgacolors) +
+  labs(title = NULL, subtitle = "b) Mini Gradient Arrays Only", x = paste0("PC1: ", PCAset2$exp[1], "%"), y = paste0("PC2: ", PCAset2$exp[2], "%")) +
+  theme_q2r() +
+  theme(plot.subtitle = element_text(size = 10))
+
+p2
+
+#ggsave(file = "pca21.svg", device=svg, plot = p,width=3,height=7)
+
+
+```
+
+
+
+Sidequest -- let's generate one coded by substrate for the supplementary.
+
+```{r}
+metaSet2 <- meta %>% 
+  subset(!Construction %in% c("F", "I"))
+
+PCAset2 <- doPCA(asv_table, metaSet2)
+
+scores_df2 <- PCAset2$scores %>%
+  mutate(
+    OrgSub = metaSet2$OrgSub,
+    HoverText = paste(
+      "Sample:", rownames(PCAset2$scores),
+      "<br>OrgSub:", OrgSub
+    )
+  )
+
+loadings_df <- as.data.frame(PCAset2$loadings * PCAset2$scale) %>%
+  mutate(
+    Genus = PCAset2$taxa$Genus,
+    Species = PCAset2$taxa$Species,
+    HoverText = paste(
+      "Phylum:", PCAset2$taxa$Phylum,
+      "<br>Order:", PCAset2$taxa$Order,
+      "<br>Family:", PCAset2$taxa$Family,
+      "<br>Genus:", PCAset2$taxa$Genus,
+      "<br>Species:", PCAset2$taxa$Species
+    )
+  )
+
+p2 <- ggplot(scores_df2, aes(PC1, PC2)) +
+  
+  stat_ellipse(
+    aes(
+      group = OrgSub,
+      colour = OrgSub,
+      fill = OrgSub
+    ),
+    geom = "polygon",
+    alpha = 0.05,
+    type = "norm",
+    level = 0.90
+  ) +
+  
+  stat_ellipse(
+    aes(
+      group = OrgSub,
+      colour = OrgSub
+    ),
+    type = "norm",
+    level = 0.90,
+    linetype = "dotted"
+  ) +
+  
+  geom_point(
+    aes(
+      colour = OrgSub,
+      fill = OrgSub,
+      shape = OrgSub
+    ),
+    size = 3
+  ) +
+  
+  geom_segment(
+    data = loadings_df,
+    aes(
+      x = 0,
+      y = 0,
+      xend = PC1,
+      yend = PC2
+    ),
+    inherit.aes = FALSE,
+    colour = "black",
+    alpha = 0.7
+  ) +
+  
+  geom_point(
+    data = loadings_df,
+    aes(PC1, PC2),
+    inherit.aes = FALSE,
+    size = 2
+  ) +
+  
+  geom_text(
+    data = loadings_df,
+    aes(
+      PC1,
+      PC2,
+      label = Genus
+    ),
+    inherit.aes = FALSE,
+    nudge_y = -0.005
+  ) +
+  
+  scale_colour_manual(values = mgacolors) +
+  scale_fill_manual(values = mgacolors) +
+  
+  scale_shape_manual(
+    values = c(
+      1, 15, 16, 17, 0, 18, 25
+    )
+  ) +
+  
+  
+  
+  
+  labs(
+    title = NULL,
+    subtitle = "b) Mini Gradient Arrays Only",
+    x = paste0("PC1: ", PCAset2$exp[1], "%"),
+    y = paste0("PC2: ", PCAset2$exp[2], "%"),
+    colour = "OrgSub",
+    fill = "OrgSub",
+    shape = "OrgSub"
+  ) +
+  
+  theme_q2r() +
+  theme(
+    plot.subtitle = element_text(size = 10)
+  )
+
+p2
+
+ggsave(file = "SubstratePCA.svg", device=svg, plot = p2,width=8,height=5)
+
+
+```
+
+## Betadisper
+
+Calculate the beta dispersion of each MGA group (Group ID, individual array) and track it over time, faceting based on location and based on construction.
+
+```{r, warning=FALSE}
+  
+# Subset data
+metaSet <- subset(meta, !Construction %in% c("I", "F"))
+
+# Calculate distance matrix + do betadisper
+asvSet <- as.data.frame(asvSet %>% t() %>% make_clr() %>% t())
+perm_dist <- getDist(asv_table, metaSet)
+
+# Do betadisper
+bd <- betadisper(perm_dist, metaSet$GroupID)
+beta_disp <- data.frame(GroupID = names(bd$group.distances), BetaDispersion = bd$group.distances)
+
+# Summarise metadata
+meta_summary <- metaSet %>%
+  group_by(GroupID) %>%
+  summarise(DaysIncubated = unique(DaysIncubated)[1], Construction = unique(Construction)[1], .groups = "drop")
+
+#Join metadata
+beta_disp <- beta_disp %>%
+  left_join(meta_summary, by = "GroupID") %>%
+  mutate(Construction = dplyr::recode(Construction, M = "Middle", TS = "TopSeal"))
+
+p3 <- ggplot(beta_disp, aes(DaysIncubated, BetaDispersion, colour = Construction, group = Construction)) +
+  geom_point(size = 2) +
+  geom_line() +
+  scale_color_manual(values = mgacolors) +
+  labs(subtitle = "c) MGA Beta Dispersion over Time", x = "Days Incubated", y = "Beta Dispersion") +
+  theme_bw() +
+  theme(legend.position = c(0.02, 0.98), legend.justification = c(0, 1), legend.background = element_rect(fill = "white", colour = NA), plot.subtitle = element_text(size = 10))
+
+p3
+
+
+```
+
+For eventual export into a figure, patch graphs together if needed.
+
+```{r fig.width=9,fig.height=7, warning=FALSE}
+
+# Panel A
+p <- p +
+  coord_cartesian(xlim = c(-0.05, 0.35)) +
+  labs(title = "Betadiversity exploration of Community Composition", subtitle = "a)Green Lake vs. In-Situ Devices") +
+  theme_bw() +
+  theme(legend.position = "none", plot.title = element_text(size = 12, face = "bold"), plot.subtitle = element_text(size = 10), panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+
+legend <- cowplot::get_legend(p2)
+
+# Panel B
+p2 <- p2 +
+  labs(title = NULL, subtitle = "b) Mini Gradient Arrays Only") +
+  theme_bw() +
+  theme(legend.position = "right", legend.justification = c(0, 1), legend.background = element_rect(fill = "white", colour = NA), plot.subtitle = element_text(size = 10))
+
+# Panel C
+p3 <- p3 +
+  labs(title = NULL, subtitle = "c) MGA Beta Dispersion over Time") +
+  theme_q2r() +
+  theme(plot.title = element_text(size = 10, face = "bold"), plot.subtitle = element_text(size = 10), plot.caption = element_text(size = 21))
+
+hi <- ((p | p2)) +
+  plot_layout(design = "ABB\nCCD\n", widths = c(3, 3))
+
+hi
+
+ggsave(file = "pcaset_new.svg", device=svg, plot = hi,width=9,height=7)
+
+
+```
+
+## Permanova
+PERMANOVA on the effect of construction, days incubated, and substrate on MGA culture columns only:
+
+```{r, warning=FALSE}
+
+perm_dist <- getDist(asv_table, metaSet)
+perma <- adonis2(perm_dist ~ Construction * DaysIncubated * Substrate, data = metaSet, permutations = 9999, by = "terms")
+perma
+
+```
+
+Remove unwanted objects before proceeding.
+
+```{r warning=FALSE}
+rm(PCAset, scores_df1, p)
+rm(PCAset2, scores_df2, loadings_df, p2, metaSet2)
+rm(metaSet, asvSet, perm_dist, bd, beta_disp, meta_summary, p3)
+rm(legend, hi)
+rm(perma)
+```
+
+## Substrate RDA 
+
+Substrate has a significant effect in the PERMANOVA, but the trend(s) can't be seen in the PCA as they are overwritten by the effects of days incubated and construction. An RDA isolates the dataset variability owed to substrate alone.
+
+CCA (Canonical Correspondence Analysis) is not viable for this use case since substrate is a categorical variable and CCA does not accommodate categorical variables.
+
+Before the RDA, let's look at pairwise comparisons of the substrates between (not among) each other. Colors by p value and percents are R\^2 values multiplied by 100.
+
+```{r}
+
+# Reset data filter
+metaSet <- subset(meta, !Construction %in% c("I", "F"))
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% row.names(metaSet)))
+
+perm_dist <- getDist(asv_table, metaSet)
+perma <- adonis2(perm_dist ~ Construction * DaysIncubated * OrgSub, data = metaSet, permutations = 9999, by = "margin")
+perma
+
+disp <- betadisper(perm_dist, metaSet$OrgSub)
+beta_disp <- data.frame(GroupID = names(disp$group.distances), BetaDispersion = disp$group.distances)
+anova(disp)
+permutest(disp)
+
+# Pairwise adonis to look at substrates pairwise
+pairwise.adonis2 <- function(x, factors, perm = 99) {
+  combs <- combn(unique(factors), 2, simplify = FALSE)
+  out <- lapply(combs, function(i) {
+    sel <- factors %in% i
+    ad <- adonis2(x[sel, sel] ~ factors[sel], permutations = perm)
+    data.frame(group1 = i[1], group2 = i[2], F = ad$F[1], R2 = ad$R2[1], p = ad$`Pr(>F)`[1])
+  })
+  do.call(rbind, out)
+}
+
+hi <- pairwise.adonis2(perm_dist, metaSet$OrgSub, perm = 99)
+
+library(scales)
+hi$R_percent <- percent(hi$R, accuracy = 1)
+hi$p_cat <- cut(hi$p, breaks = c(-Inf, 0.01, 0.05, Inf), labels = c("≤0.01", "0.01–0.05", ">0.05"))
+
+ggplot(hi, aes(group1, group2)) +
+  geom_tile(aes(fill = p_cat), color = "white") +
+  geom_text(aes(label = R_percent), size = 4) +
+  scale_fill_manual(values = c("≤0.01" = "red", "0.01–0.05" = "mistyrose", ">0.05" = "white"), name = "p-value") +
+  coord_equal() +
+  labs(x = "Substrate Group 1", y = "Substrate Group 2") +
+  theme_minimal(base_size = 14) +
+  theme(panel.grid = element_blank(), axis.text.x = element_text(angle = 45, hjust = 1))
+
+rm(perm_dist, perma, disp, beta_disp, pairwise.adonis2, hi)
+
+```
+
+Follow up with the actual redundancy analysis (RDA) to investigate of the effect of substrate on MGA community composition.
+
+```{r}
+
+# Data filter does not need to be reset at this stage.
+
+# Run an RDA model that is only substrates so that axes are linear combinations of substrates
+asvSetLater <- asvSet
+
+# Reminder to log-center transform this again
+# Since RDAs are euclidean, this will be equivalent/comparable to the PCAs we make later
+asvSet <- asvSet %>% t() %>% make_clr() %>% t()
+
+# Refactor
+metaSet$OrgSub <- relevel(factor(metaSet$OrgSub), ref = "Blank")
+
+# Do the RDA
+rda_mod <- rda(asvSet ~ OrgSub + Condition(DaysIncubated + Construction), data = metaSet)
+
+# Make scores dataframes
+scores_df <- as.data.frame(scores(rda_mod, display = "sites"))
+scores_df$Substrate <- metaSet$Substrate
+
+site_scores <- as.data.frame(scores(rda_mod, display = "sites"))
+species_scores <- as.data.frame(scores(rda_mod, display = "species"))
+biplot_scores <- as.data.frame(scores(rda_mod, display = "bp"))
+
+rownames(biplot_scores) <- gsub("OrgSub", "", rownames(biplot_scores))
+biplot_scores$Substrate <- rownames(biplot_scores)
+
+# Rename species scores with taxonomy
+taxonomy <- as.data.frame(taxonomy)
+species_scores <- merge(species_scores, taxonomy, by.x = "row.names", by.y = "ASV", all.x = TRUE)
+rownames(species_scores) <- species_scores$Row.names
+species_scores$Row.names <- NULL
+
+# Add metadata to sites
+site_scores$Substrate <- factor(as.character(metaSet$OrgSub))
+site_scores$Construction <- metaSet$Construction
+site_scores$DaysInc <- metaSet$DaysIncubated
+site_scores$Groupy <- paste(site_scores$Substrate, site_scores$DaysInc)
+site_scores$RDA1abs <- abs(site_scores$RDA1)
+site_scores$RDA2abs <- abs(site_scores$RDA2)
+
+# Split data by Substrate
+split_data <- split(site_scores, site_scores$Substrate)
+
+# Calculate centroids + SE for each group
+centroids <- lapply(split_data, function(df) {
+  data.frame(
+    Substrate = unique(df$Substrate),
+    RDA1 = mean(df$RDA1),
+    RDA2 = mean(df$RDA2),
+    se.RDA1 = sd(df$RDA1) / sqrt(nrow(df)),
+    se.RDA2 = sd(df$RDA2) / sqrt(nrow(df))
+  )
+}) %>% do.call(rbind, .)
+
+# Reset rownames
+rownames(centroids) <- NULL
+
+
+```
+
+Redundancy analysis of the effect of subtrate on MGA community composition.
+
+```{r}
+
+# Data filter
+metaSet<-subset(meta, Location == "GL")
+metaSet<-subset(metaSet, Construction != "F")
+metaSet<-subset(metaSet, Construction != "I")
+metaSet<-subset(metaSet, Construction != "TO")
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% row.names(metaSet)))
+
+# Run an RDA model that is only substrates so that axes are linear combinations of substrates
+# Reminder to log-center transform this again 
+# Since RDAs are euclidean, this will be equivalent/comparable to the PCAs we make later
+asvSet<- asvSet %>% t() %>% make_clr() %>%t()
+
+# Refactor
+metaSet$OrgSub <- factor(metaSet$OrgSub)
+metaSet$OrgSub <- relevel(metaSet$OrgSub, ref = "Blank")
+
+# Do the RDA
+rda_mod <- rda(asvSet ~ OrgSub, data = metaSet)
+
+# Make scores dataframes
+scores_df <- as.data.frame(scores(rda_mod, display = "sites"))
+scores_df$Substrate <- metaSet$Substrate
+
+site_scores    <- as.data.frame(scores(rda_mod, display = "sites"))
+species_scores <- as.data.frame(scores(rda_mod, display = "species"))
+biplot_scores  <- as.data.frame(scores(rda_mod, display = "bp"))
+
+# Rename "none" as "S0" (elemental sulfur)
+rownames(biplot_scores)[rownames(biplot_scores) == "None"] <- "S0"
+
+rownames(biplot_scores) <- gsub("OrgSub", "", rownames(biplot_scores))
+biplot_scores$Substrate <- rownames(biplot_scores)
+idx <- rownames(biplot_scores) == "None"
+
+rownames(biplot_scores)[idx] <- "S0"
+biplot_scores$Substrate[idx] <- "S0"
+
+#Rename species scores with taxonomy
+taxonomy<-as.data.frame(taxonomy)
+species_scores <- merge(species_scores, taxonomy, by.x = "row.names", by.y = "ASV", all.x = TRUE)
+rownames(species_scores ) <- species_scores $Row.names
+species_scores$Row.names <- NULL
+
+# add metadata to sites
+site_scores$Substrate <- metaSet$OrgSub
+site_scores$Substrate <- as.character(site_scores$Substrate)
+site_scores$Substrate[site_scores$Substrate == "None"] <- "S0"
+site_scores$Substrate <- factor(site_scores$Substrate)
+
+site_scores$Construction <- metaSet$Construction
+site_scores$DaysInc <- metaSet$DaysIncubated
+site_scores$Groupy <- paste(site_scores$Substrate,site_scores$DaysInc)
+
+site_scores$RDA1abs <- abs(site_scores$RDA1)
+site_scores$RDA2abs <- abs(site_scores$RDA2)
+
+# split data by Substrate
+split_data <- split(site_scores, site_scores$Substrate)
+
+# calculate centroids + SE for each group
+centroids <- lapply(split_data, function(df) {
+  data.frame(
+    Substrate = unique(df$Substrate),
+    RDA1 = mean(df$RDA1),
+    RDA2 = mean(df$RDA2),
+    se.RDA1 = sd(df$RDA1) / sqrt(nrow(df)),
+    se.RDA2 = sd(df$RDA2) / sqrt(nrow(df))
+  )})
+
+# combine into one dataframe
+centroids <- do.call(rbind, centroids)
+
+# reset rownames
+rownames(centroids) <- NULL
+
+# Plot
+
+p <- ggplot() +
+  xlab(paste0("RDA1: ", round(rda_mod[["CCA"]][["eig"]][["RDA1"]], 3), "%")) +
+  ylab(paste0("RDA2: ", round(rda_mod[["CCA"]][["eig"]][["RDA2"]], 2), "%")) +
+
+  geom_segment(data = biplot_scores, aes(x = 0, y = 0, xend = RDA1, yend = RDA2), 
+               arrow = arrow(length = unit(0.2, "cm"), type = "closed"), color = "black") +
+
+  scale_color_manual(values = mgacolors) +
+  scale_fill_manual(values = mgacolors) +
+  scale_shape_manual(values = c(1, 15, 16, 17, 0, 18, 25)) +
+  geom_errorbar(data = centroids, aes(x = RDA1, ymin = RDA2 - se.RDA2, ymax = RDA2 + se.RDA2), width = 0.12, linewidth = 1.5, color = "white") +
+  geom_errorbarh(data = centroids, aes(y = RDA2, xmin = RDA1 - se.RDA1, xmax = RDA1 + se.RDA1), height = 0.12, linewidth = 1.5, color = "white") +
+  geom_errorbar(data = centroids, aes(x = RDA1, ymin = RDA2 - se.RDA2, ymax = RDA2 + se.RDA2, color = Substrate), width = 0.04, linewidth = 0.35) +
+  geom_errorbarh(data = centroids, aes(y = RDA2, xmin = RDA1 - se.RDA1, xmax = RDA1 + se.RDA1, color = Substrate), height = 0.04, linewidth = 0.35) +
+  geom_point(data = centroids, aes(RDA1, RDA2), shape = c(16, 15, 16, 17, 15, 18, 25), size = c(4.5, 4.5, 4, 5, 4.5, 5, 4), color = "#fff", fill = "#fff") +
+  geom_point(data = centroids, aes(RDA1, RDA2, color = Substrate, fill = Substrate), shape = c(1, 15, 16, 17, 0, 18, 25), size = 3) +
+  theme_minimal()+
+
+  geom_rect(aes(xmin = -0.5, xmax = 1, ymin = -1, ymax = 0.5), fill = NULL, 
+            alpha = 0, color = "red", linetype = "dashed") +
+
+  theme_minimal()
+
+p
+
+
+```
+
+Zoom in on vectors and species.
+
+```{r}
+library(ggrepel)
+
+## Associate each substrate with a UNIQUE ASV
+## Strongest ASV-substrate correlations are assigned first
+
+# Add species label
+species_scores$label <- apply(species_scores[, c("Phylum","Order","Family","Genus","Species")], 1, function(x) {
+  paste(tail(x[!is.na(x) & x != "NA" & x != ""], 2), collapse = " ")
+})
+
+# Make species and substrate vector matrices
+species_mat <- as.matrix(species_scores[, c("RDA1","RDA2")])
+vec_mat <- as.matrix(biplot_scores[, c("RDA1","RDA2")])
+
+# Calculate dot product of EVERY ASV against EVERY substrate
+score_matrix <- species_mat %*% t(vec_mat)
+colnames(score_matrix) <- biplot_scores$Substrate
+rownames(score_matrix) <- rownames(species_scores)
+
+# Create every possible ASV-substrate combination
+pairs <- expand.grid(
+  ASV = rownames(score_matrix),
+  Substrate = colnames(score_matrix),
+  stringsAsFactors = FALSE
+)
+
+# Add correlation/dot-product score
+pairs$score <- mapply(
+  function(asv, substrate) score_matrix[asv, substrate],
+  pairs$ASV,
+  pairs$Substrate
+)
+
+# Sort strongest associations first
+pairs <- pairs[order(pairs$score, decreasing = TRUE), ]
+
+# Greedily assign unique ASVs to substrates
+# Once an ASV is assigned, no other substrate can use it
+# Once a substrate is assigned, it cannot receive another ASV
+used_asvs <- character(0)
+used_substrates <- character(0)
+assignments <- list()
+
+for (i in seq_len(nrow(pairs))) {
+  if (!(pairs$ASV[i] %in% used_asvs) &&
+      !(pairs$Substrate[i] %in% used_substrates)) {
+    
+    assignments[[length(assignments) + 1]] <- pairs[i, ]
+    used_asvs <- c(used_asvs, pairs$ASV[i])
+    used_substrates <- c(used_substrates, pairs$Substrate[i])
+  }
+}
+
+# Combine assignments
+top_species <- do.call(rbind, assignments)
+
+# Add species information
+top_species <- merge(
+  top_species,
+  species_scores,
+  by.x = "ASV",
+  by.y = "row.names"
+)
+
+rownames(top_species) <- top_species$ASV
+
+# Add font style
+top_species$fontface <- "bold"
+
+# Assign each selected ASV to its substrate
+species_scores$best_substrate <- "nosub"
+species_scores$shape_type <- "nosub"
+
+for (i in seq_len(nrow(top_species))) {
+  species_scores$best_substrate[
+    rownames(species_scores) == top_species$ASV[i]
+  ] <- top_species$Substrate[i]
+  
+  species_scores$shape_type[
+    rownames(species_scores) == top_species$ASV[i]
+  ] <- "assigned"
+}
+
+# Plot
+p2 <- ggplot() +
+  xlab(paste0("RDA1: ", round(rda_mod[["CCA"]][["eig"]][["RDA1"]], 3), "%")) +
+  ylab(paste0("RDA2: ", round(rda_mod[["CCA"]][["eig"]][["RDA2"]], 2), "%")) +
+  geom_point(
+    data = species_scores,
+    aes(RDA1, RDA2, color = best_substrate, shape = shape_type),
+    alpha = 0.5
+  ) +
+  scale_shape_manual(values = c(nosub = 4, assigned = 16)) +
+  geom_segment(
+    data = biplot_scores,
+    aes(x = 0, y = 0, xend = RDA1, yend = RDA2, color = Substrate),
+    arrow = arrow(length = unit(0.2, "cm")),
+    type = "closed",
+    linewidth = 1
+  ) +
+  geom_text_repel(
+    data = biplot_scores,
+    aes(RDA1, RDA2, label = Substrate, color = Substrate),
+    fontface = "bold"
+  ) +
+  geom_text_repel(
+    data = top_species,
+    aes(RDA1, RDA2, label = label, color = Substrate),
+    size = 3
+  ) +
+  scale_color_manual(values = c(mgacolors, nosub = "grey70")) +
+  theme_minimal()
+
+p2
+
+# Remove intermediate objects
+rm(species_mat, vec_mat, score_matrix, pairs, top_species)
+```
+
+
+Make a combination graph with cowplot + patchwork
+
+```{r fig.width=9,fig.height=4}
+
+
+p3<-cowplot::get_legend(p2)
+
+p<-p+ ggtitle("Mini Gradient Array Substrate RDA") + theme(legend.position="none",plot.title = element_text(size = 12, face = "bold")) + labs(subtitle = "a) Centroid Points by Substrate")+ theme(plot.subtitle=element_text(size=10))
+
+p2<-p2+ ggtitle("") + theme(legend.position="none")  + labs(subtitle = "b) Zoomed-in View of Species, Substrate Loadings")+ theme(plot.subtitle=element_text(size=10))+ xlab(" ") + ylab(" ")+  geom_rect(aes(xmin = -0.5, xmax = 1, ymin = -1, ymax = 0.5), 
+            fill = NULL, alpha = 0, color = "red",linetype="dashed")
+
+hi<-(p | p2 |p3) + plot_layout(widths = c(2,3,1)) 
+
+hi
+
+ggsave(file = "RDA3.svg", device=svg, plot = hi,width=9,height=4)
+
+rm(hi)
+
+```
+
+
+## Heatmap by substrate
+
+Construct a substrate and taxa heatmap, collapsed by label, where only significant (p\<0.05) correlations are plotted. After collapsing by label, taxa are filtered for prevalence (at least 1% abundant in two samples / culture columns)
+
+"Label" in this case collapses taxa by last two taxonomic designations in SILVA.
+
+E.g. *Bacteria Proteobacteria Gammaproteobacteria Burkholderiales Burkholderiaceae Limnobacter thiooxidans* will have the label "*Limnobacter thiooxidans"*
+
+Whereas *Bacteria Elusimicrobiota Elusimicrobia Lineage IV NA NA NA* will have the label "*Elusimicrobia Lineage IV"*
+
+```{r}
+
+library(Hmisc)
+library(dplyr)
+library(ggplot2)
+
+# Reset data filter
+metaSet <- subset(meta, !Construction %in% c("I", "F"))
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% row.names(metaSet)))
+
+asvSet <- asvSet[rownames(metaSet), ]
+asv_rel <- asvSet / rowSums(asvSet)
+
+#Iterate and add label, which is made up of the last two names before an NA shows up
+species_scores$label <- apply(species_scores[, c("Phylum", "Order", "Family", "Genus", "Species")], 1, function(x) paste(tail(x[!is.na(x) & x != "NA" & x != ""], 2), collapse = " "))
+
+# ASV -> taxon lookup
+tax_lookup <- species_scores[, "label", drop = FALSE]
+tax_lookup$ASV <- rownames(species_scores)
+
+# Keep only ASVs present in abundance table
+tax_lookup <- tax_lookup[tax_lookup$ASV %in% colnames(asv_rel), ]
+
+# Match lookup to ASV order
+tax_lookup <- tax_lookup[match(colnames(asv_rel), tax_lookup$ASV), ]
+
+# Replace missing labels with ASV IDs (optional)
+tax_lookup$label[is.na(tax_lookup$label)] <- tax_lookup$ASV[is.na(tax_lookup$label)]
+
+# Transpose so ASVs become rows
+tmp <- as.data.frame(t(asv_rel))
+tmp$label <- tax_lookup$label
+
+# Sum ASVs belonging to the same taxon
+tmp_taxa <- aggregate(. ~ label, data = tmp, FUN = sum)
+
+# Back to samples x taxa
+rownames(tmp_taxa) <- tmp_taxa$label
+tmp_taxa$label <- NULL
+asv_rel_taxa <- t(as.matrix(tmp_taxa))
+
+# Filter taxa by prevalence
+asv_filtered <- asv_rel_taxa[, apply(asv_rel_taxa, 2, function(x) sum(x >= 0.01) >= 2)]
+
+# Create substrate dummy variables
+substrate_mat <- model.matrix(~ OrgSub - 1, data = metaSet)
+colnames(substrate_mat) <- gsub("^OrgSub", "", colnames(substrate_mat))
+
+# Correlations
+cor_input <- cbind(substrate_mat, asv_filtered)
+cor_test <- rcorr(as.matrix(cor_input), type = "spearman")
+
+n_sub <- ncol(substrate_mat)
+rho_mat <- cor_test$r[1:n_sub, (n_sub + 1):ncol(cor_input)]
+p_mat <- cor_test$P[1:n_sub, (n_sub + 1):ncol(cor_input)]
+
+# Convert to long format
+cor_df <- expand.grid(Substrate = rownames(rho_mat), label = colnames(rho_mat))
+cor_df$Correlation <- as.vector(rho_mat)
+cor_df$p_value <- as.vector(p_mat)
+
+# FDR correction
+cor_df$FDR <- p.adjust(cor_df$p_value, method = "BH")
+
+# Significant taxa
+cor_sig <- cor_df %>% filter(p_value < 0.05)
+
+# Distribution of correlations
+hist(cor_df$Correlation, breaks = 50, main = "Taxon-substrate Spearman correlations", xlab = "Spearman rho")
+
+# Heatmap
+ggplot(cor_sig, aes(x = Substrate, y = label, fill = Correlation)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, limits = c(-1, 1), name = "Spearman\nrho") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 10), panel.grid = element_blank()) +
+  labs(x = "OrgSub", y = "Taxon")
+
+```
+
+## Heatmap putative SRB
+Obviously, compare if sulfate reducers with enriched in substrates above blank and glucose...
+
+```{r}
+
+# Reset data filter
+metaSet <- subset(meta, !Construction %in% c("I", "F"))
+asvSRB_save<-asvSRB
+asvSRB <- as.data.frame(subset(asvSRB, row.names(asvSRB) %in% row.names(metaSet)))
+
+# Remove ASVs absent from all samples
+asvSRB <- asvSRB[, colSums(asvSRB) > 0, drop = FALSE]
+asvSRB <- asvSRB[rowSums(asvSRB) > 0, , drop = FALSE]
+
+# Convert counts to relative abundance per sample
+asv_rel <- asvSRB / rowSums(asvSRB)
+
+# ASV -> taxon lookup
+tax_lookup <- species_scores[, "label", drop = FALSE]
+tax_lookup$ASV <- rownames(species_scores)
+
+# Keep ASVs present in abundance table
+tax_lookup <- tax_lookup[tax_lookup$ASV %in% colnames(asv_rel), ]
+
+# Match ASV order to abundance table
+tax_lookup <- tax_lookup[match(colnames(asv_rel), tax_lookup$ASV), ]
+
+# Replace missing labels with ASV IDs
+tax_lookup$label[is.na(tax_lookup$label)] <- tax_lookup$ASV[is.na(tax_lookup$label)]
+
+# Collapse ASVs sharing the same taxon label
+tmp <- as.data.frame(t(asv_rel))
+tmp$label <- tax_lookup$label
+tmp_taxa <- aggregate(. ~ label, data = tmp, FUN = sum)
+
+# Return taxa as rows
+rownames(tmp_taxa) <- tmp_taxa$label
+tmp_taxa$label <- NULL
+
+# Samples x taxa
+asv_rel_taxa <- t(as.matrix(tmp_taxa))
+
+# Filter taxa:
+# keep taxa reaching >=1% relative abundance in at least 2 samples
+asv_filtered <- asv_rel_taxa[, apply(asv_rel_taxa, 2, function(x) sum(x >= 0.01) >= 2), drop = FALSE]
+
+# Match metadata to ASV table samples
+metaSet_cor <- metaSet[rownames(asv_filtered), , drop = FALSE]
+
+# Recreate substrate matrix with matching samples
+substrate_mat <- model.matrix(~ OrgSub - 1, data = metaSet_cor)
+colnames(substrate_mat) <- gsub("^OrgSub", "", colnames(substrate_mat))
+
+# Correlation matrix input
+cor_input <- cbind(substrate_mat, asv_filtered)
+
+# Spearman correlations
+cor_test <- rcorr(as.matrix(cor_input), type = "spearman")
+n_sub <- ncol(substrate_mat)
+
+rho_mat <- cor_test$r[1:n_sub, (n_sub + 1):ncol(cor_input), drop = FALSE]
+p_mat <- cor_test$P[1:n_sub, (n_sub + 1):ncol(cor_input), drop = FALSE]
+
+# Convert to long format
+cor_df <- expand.grid(Substrate = rownames(rho_mat), label = colnames(rho_mat))
+cor_df$Correlation <- as.vector(rho_mat)
+cor_df$p_value <- as.vector(p_mat)
+
+# FDR correction
+cor_df$FDR <- p.adjust(cor_df$p_value, method = "BH")
+
+# Significant correlations
+cor_sig <- cor_df %>% filter(p_value < 0.05)
+
+# Correlation distribution
+hist(cor_df$Correlation, breaks = 50, main = "Taxon-substrate Spearman correlations", xlab = "Spearman rho")
+
+# Heatmap
+ggplot(cor_sig, aes(x = Substrate, y = label, fill = Correlation)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, limits = c(-1, 1), name = "Spearman\nrho") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 10), panel.grid = element_blank()) +
+  labs(x = "OrgSub", y = "Taxon")
+
+```
+
+Remove unneeded objects.
+
+```{r warning=FALSE}
+
+rm(asvSetLater, rda_mod, scores_df, site_scores, species_scores, biplot_scores, split_data, centroids, p)
+rm(asv_rel, tax_lookup, tmp, tmp_taxa, asv_rel_taxa, asv_filtered, substrate_mat, cor_input, cor_test, n_sub, rho_mat, p_mat, cor_df, cor_sig)
+rm(df, desulfo_asvs, asv_rel, tax_lookup, tmp, tmp_taxa, asv_rel_taxa, asv_filtered, metaSet_cor, substrate_mat, cor_input, cor_test, n_sub, rho_mat, p_mat, cor_df, cor_sig)
+
+```
+
+# █ Alpha Diversity
+
+## Tukey Test + Alpha Diversity
+
+Calculate the difference between species richness in the Filter (GL), iChip, and MGA groups.
+
+```{r}
+
+library(ggpubr)
+
+# Reset the metadata subset
+metaSet <- meta
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% row.names(metaSet)))
+
+# Further Remove groups not used in plotting just in case they've slipped in
+metaPlot <- metaSet %>% filter(!Construction %in% c("ECB", "BIO"))
+
+# Define the specific despired pairwise comparisons
+my_comparisons <- list(c("Filter", "MGA"), c("Filter", "iChip"), c("MGA", "iChip"))
+
+# Summarize for plotting
+dt <- metaPlot %>% group_by(AlphaType) %>% summarise(mean = mean(species, na.rm = TRUE), quant = quantile(species, 0.75, na.rm = TRUE), quant100 = max(species, na.rm = TRUE), .groups = "drop")
+
+# T-test
+stat_test <- compare_means(species ~ AlphaType, data = metaPlot, comparisons = my_comparisons, method = "t.test")
+
+# Apply significance stars to t-test for plotting
+stat_test$label <- symnum(stat_test$p, corr = FALSE, cutpoints = c(0, 0.001, 0.01, 0.05, 1), symbols = c("***", "**", "*", "ns"))
+
+# Plot
+p1 <- ggplot(metaPlot, aes(x = AlphaType, y = species, fill = AlphaType)) +
+  geom_violin(alpha = 1, width = 1, scale = "width", color = NA) +
+  stat_summary(fun.data = mean_sdl, mult = 1, geom = "pointrange", color = "black") +
+  stat_compare_means(comparisons = my_comparisons, method = "t.test", label = "p.signif", hide.ns = TRUE) +
+  scale_fill_manual(values = mgacolors) +
+  guides(fill = "none") +
+  ylab("species") +
+  theme(panel.grid.major = element_line(colour = "#cccccc", linetype = "dashed"), axis.title.x = element_blank(), axis.text.x = element_text(), panel.grid.major.x = element_blank(), panel.grid.minor.x = element_blank(), panel.background = element_blank(), axis.ticks.x = element_blank(), plot.margin = margin(t = 10, r = 5, b = 5, l = 20, "points"))
+
+# Make some plot alterations. Currently getting the "log scale" to work is messing with the sig stars. ignore.
+# p1.1<-p1 +
+#   coord_cartesian(clip = "off") +
+#   ggtitle("c) Species Richness") +
+#   labs(y = "species",
+#     subtitle = "Grouped mean") +
+#   theme(
+#     plot.title = element_text(size = 12, face = "bold"),
+#     plot.subtitle = element_text(size = 10)) +
+#  scale_y_log10() +
+# coord_cartesian(
+#   ylim = c(1, 7000),
+#   clip = "off"
+# )
+#
+# p1.1
+
+p1
+
+#Species richness for all iChip and MGA sample groups
+
+#Subset the data, remove filter...
+metaSet <- subset(meta, Construction != "F")
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% row.names(metaSet)))
+
+# Species richness just among in-situ devices
+
+# ANOVA and Tukey
+anova <- aov(species ~ GroupID, data = metaSet)
+tukey <- TukeyHSD(anova)
+cld <- multcompLetters4(anova, tukey)
+cld_vec <- cld$GroupID$Letters
+
+dt <- metaSet %>% filter(!Construction %in% c("ECB", "BIO")) %>% group_by(GroupID) %>% summarise(mean = mean(species, na.rm = TRUE), quant = quantile(species, 0.75, na.rm = TRUE), quant100 = max(species, na.rm = TRUE), .groups = "drop") %>% mutate(cld = cld_vec[as.character(GroupID)]) %>% group_by(GroupID) %>% slice_max(order_by = quant100, n = 1) %>% ungroup()
+
+# Plot
+p2 <- ggplot(metaSet, aes(x = GroupID, y = species, fill = GroupID)) +
+  geom_violin(alpha = 1, width = 1, color = NA) +
+  geom_text(data = dt, aes(x = GroupID, y = 200, vjust = -.5, label = cld), inherit.aes = FALSE) +
+  scale_fill_manual(values = mgacolors) +
+  stat_summary(fun.data = mean_sdl, mult = 1, geom = "pointrange", color = "black") +
+  facet_grid(. ~ GroupID, scales = "free_x") +
+  guides(fill = "none") +
+  ylab("species") +
+  theme(panel.grid.major = element_line(colour = "#cccccc", linetype = "dashed"), axis.title.x = element_blank(), axis.text.x = element_blank(), panel.grid.major.x = element_blank(), panel.grid.minor.x = element_blank(), panel.background = element_blank(), axis.ticks.x = element_blank(), plot.margin = margin(t = 10, r = 5, b = 5, l = 20, "points"))
+
+p2
+
+# No need to subset the data again.
+
+# ANOVA and Tukey
+anova <- aov(shannon ~ GroupID, data = metaSet)
+tukey <- TukeyHSD(anova)
+cld <- multcompLetters4(anova, tukey)
+cld_vec <- cld$GroupID$Letters
+
+# Summarize for plotting
+dt <- metaSet %>% filter(!Construction %in% c("ECB", "BIO")) %>% group_by(GroupID) %>% summarise(mean = mean(shannon, na.rm = TRUE), quant = quantile(shannon, 0.75, na.rm = TRUE), quant100 = max(shannon, na.rm = TRUE), .groups = "drop") %>% mutate(cld = cld_vec[as.character(GroupID)]) %>% group_by(GroupID) %>% slice_max(order_by = quant100, n = 1) %>% ungroup()
+
+# Plot
+p3 <- ggplot(metaSet, aes(x = GroupID, y = shannon, fill = GroupID)) +
+  geom_violin(alpha = 1, width = 1, color = NA) +
+  geom_text(data = dt, aes(x = GroupID, y = 4.25, vjust = -.5, label = cld), inherit.aes = FALSE) +
+  scale_fill_manual(values = mgacolors) +
+  stat_summary(fun.data = mean_sdl, mult = 1, geom = "pointrange", color = "black") +
+  facet_grid(. ~ GroupID, scales = "free_x") +
+  guides(fill = "none") +
+  ylab("shannon") +
+  theme(panel.grid.major = element_line(colour = "#cccccc", linetype = "dashed"), axis.title.x = element_blank(), axis.text.x = element_blank(), panel.grid.major.x = element_blank(), panel.grid.minor.x = element_blank(), panel.background = element_blank(), axis.ticks.x = element_blank(), plot.margin = margin(t = 10, r = 5, b = 5, l = 20, "points"))
+
+p3
+
+# Venn / Euler Diagram
+library(eulerr)
+
+# Filter dataset
+#metaSet <- subset(meta, Construction != "TO")
+metaSet <- subset(meta, Location != "BR")
+#metaSet <- subset(metaSet, AlphaType != "Filter")
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% row.names(metaSet)))
+asvSet <- t(asvSet[, colSums(asvSet) > 1] %>% filter_features(1, 1))
+
+# sample names belonging to each treatment
+middle.samples <- rownames(metaSet)[metaSet$Construction == "M"]
+middle.samples <- intersect(middle.samples, colnames(asvSet))
+middle.asvs <- rownames(asvSet)[rowSums(asvSet[, middle.samples] > 0) > 0]
+
+topseal.samples <- rownames(metaSet)[metaSet$Construction == "TS"]
+topseal.samples <- intersect(topseal.samples, colnames(asvSet))
+topseal.asvs <- rownames(asvSet)[rowSums(asvSet[, topseal.samples] > 0) > 0]
+
+topopen.samples <- rownames(metaSet)[metaSet$Construction == "TO"]
+topopen.samples <- intersect(topopen.samples, colnames(asvSet))
+topopen.asvs <- rownames(asvSet)[rowSums(asvSet[, topopen.samples] > 0) > 0]
+topopen.asvs <- unique(c(topopen.asvs, "DUMMY_TOPOPEN_ASV_001"))
+
+ichip.samples <- rownames(metaSet)[metaSet$Type == "iChip"]
+ichip.samples <- intersect(ichip.samples, colnames(asvSet))
+ichip.asvs <- rownames(asvSet)[rowSums(asvSet[, ichip.samples] > 0) > 0]
+
+filter.samples <- rownames(metaSet)[metaSet$Type == "Filter"]
+filter.samples <- intersect(filter.samples, colnames(asvSet))
+filter.asvs <- rownames(asvSet)[rowSums(asvSet[, filter.samples] > 0) > 0]
+
+mga.samples <- rownames(metaSet)[metaSet$AlphaType == "MGA"]
+mga.samples <- intersect(mga.samples, colnames(asvSet))
+mga.asvs <- rownames(asvSet)[rowSums(asvSet[, mga.samples] > 0) > 0]
+
+projected.env <- unique(c(
+  #middle.asvs,
+  #topseal.asvs,
+  ichip.asvs,
+  #topopen.asvs,
+  mga.asvs,
+  filter.asvs
+))
+
+fit <- euler(list(
+  #Middle = middle.asvs,
+  iChip = ichip.asvs,
+  #Topseal = topseal.asvs,
+  #TopOpen = topopen.asvs,
+  Filter = filter.asvs,
+  MGA = mga.asvs
+))
+
+venn <- plot(fit, quantities = FALSE, alpha = 1, labels = TRUE, edges = TRUE, fills = c("#ffa800", "#89d814", "#ad4b9c"))
+
+# Original Eulerr to ggplot function by: danlooo/ggeulerr.R
+#https://gist.github.com/danlooo/d23d8bcf8856c7dd8e86266097404ded
+#This is edited
+
+library(tidyverse)
+library(eulerr)
+library(ggforce)
+
+combinations <- list(
+  #Middle = middle.asvs,
+  iChip = ichip.asvs,
+  #Topseal = topseal.asvs,
+  #TopOpen = topopen.asvs,
+  Filter = filter.asvs,
+  MGA = mga.asvs
+)
+
+euler_fit <- eulerr::euler(combinations = combinations)
+data <- euler_fit %>% plot(quantities = TRUE) %>% pluck("data")
+
+#This plots the error rates in the fit of the euler diagram. In our case we are only comparing three groups, so the error is quite small. The error rate just speaks to if the size areas displayed, e.g. the ratios of the areas are proportional to the actual data.
+error_plot(euler_fit)
+
+label_df <- data$centers %>% as.data.frame() %>% tibble::rownames_to_column("region") %>% mutate(quantity = data$original.values[region], label = paste0(region, "\n", quantity))
+
+# Remove large labels from combos
+label_df <- label_df %>% mutate(label = ifelse(grepl("&", region), gsub("[^0-9]", "", label), label))
+
+venn <- ggplot() +
+  geom_ellipse(data = data$shapes %>% as_tibble(rownames = "Set"), aes(x0 = h, y0 = k, a = a, b = b, angle = 0, fill = Set), alpha = 0.5, colour = NA) +
+  # geom_text(
+  #   data = label_df,
+  #   aes(x = x, y = y, label = quantity)
+  # ) +
+  geom_text(data = label_df, aes(x = x, y = y, label = label)) +
+  coord_fixed() +
+  scale_fill_hue() +
+  theme_void()
+
+venn <- venn +
+  theme(legend.position = "none", plot.title = element_text(size = 12, face = "bold"), plot.subtitle = element_text(size = 10), axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), panel.grid = element_blank(), plot.margin = unit(c(1, 0, 1, 0), "pt")) +
+  scale_fill_manual(values = c(iChip = "#ffa800", Filter = "#89d814", #Middle = "#c72c0e",
+  #TopSeal = "#2285c9"
+  #TopOpen = "#89d814"
+  MGA = "#ad4b9c"
+  ))
+
+venn
+
+```
+
+Combine everything into an overall figure, and clean up R environment from unneeded objects.
+
+```{r fig.width=8,fig.height=4}
+
+#Combine all with edits
+
+venn <- venn + ggtitle("a) Species Richness") +
+  labs(subtitle = "Presence/Absence") +
+  coord_fixed() +
+  coord_flip()
+
+p2 <- p2 + ylim(-20, 230) +
+  coord_cartesian(clip = "off") +
+  ggtitle("b) Richness & Evenness") +
+  labs(y = " ", subtitle = "Individual In-Situ Devices (no Filter)") +
+  theme(plot.title = element_text(size = 12, face = "bold"), plot.subtitle = element_text(size = 10))
+
+p3 <- p3 + ylim(-.5, 4.5) +
+  coord_cartesian(clip = "off") +
+  theme(strip.text = element_blank())
+p <- (venn | p1| ( p2 / p3)) + plot_layout(widths = c(3, 2,4)) + plot_annotation(title = "   Alpha Diversity Comparison")
+
+
+p
+
+ggsave(file = "alpha2.svg", device=svg, plot = p,width=8,height=4)
+
+```
+
+Remove unneeded objects
+
+```{r warning=FALSE}
+
+rm(metaSet, asvSet, metaPlot, my_comparisons, dt, stat_test, p1, anova, tukey, cld, cld_vec, p2, p3, middle.samples, middle.asvs, topseal.samples, topseal.asvs, topopen.samples, topopen.asvs, ichip.samples, ichip.asvs, filter.samples, filter.asvs, mga.samples, mga.asvs, projected.env, fit, venn, combinations, euler_fit, data, error_plot, label_df)
+
+```
+
+
+# █ Taxonomic Barplot
+
+Original source code from the Bisanz Lab qiime2R package function taxa_barplot was used as a base for the following code, which generates a taxonomic barplot.
+
+## Top 10 taxa by Class
+
+```{r warning=FALSE, message=FALSE, fig.width=7,fig.height=4}
+
+
+#Subset for plotting the bar plot
+metaSet <- subset(meta, Construction != "TO")
+metaSet <- subset(metaSet, Location != "BR")
+asvSet <- subset(asv_table, row.names(asv_table) %in% row.names(metaSet))
+asvSet <- as.data.frame(asvSet)
+metaSet <- metaSet %>% mutate(OrgSub = if_else(OrgSub == "None", "Blank", OrgSub))
+
+# Add GroupID to ASV table
+asvSet$GroupID <- metaSet$GroupID
+
+metaSet$AlphaFill[metaSet$AlphaFill == "TopSeal"] <- "TopSealed MGA"
+metaSet$AlphaFill[metaSet$AlphaFill == "Middle"] <- "Middle MGA"
+
+metaSet <- metaSet %>% mutate(
+  Abbr = case_when(
+    AlphaType == "Filter" & str_detect(NewName, "09") ~ "Sep",
+    AlphaType == "Filter" & str_detect(NewName, "10") ~ "Oct",
+    AlphaType == "Filter" & str_detect(NewName, "11") ~ "Nov",
+    AlphaType == "iChip" ~ "Nov",
+    TRUE ~ as.character(Abbr)
+  )
+)
+
+# Create conditional grouping variable
+metaSet <- metaSet %>% mutate(
+  GroupVar = if_else(
+    AlphaType == "Filter",
+    as.character(Abbr),
+    as.character(OrgSub)
+  )
+)
+
+# Average each ASV across GroupID + conditional grouping variable
+asvSet <- asvSet %>%
+  mutate(GroupID = metaSet$GroupID, GroupVar = metaSet$GroupVar) %>%
+  group_by(GroupID, GroupVar) %>%
+  dplyr::summarize(across(where(is.numeric), ~ mean(.x, na.rm = TRUE))) %>%
+  ungroup() %>%
+  unite("NewName", GroupID, GroupVar, remove = FALSE) %>%
+  column_to_rownames("NewName")
+
+#Create an "average" / mean row for all the same GroupIDs
+# calculate group means
+group_means <- asvSet %>%
+  group_by(GroupID) %>%
+  dplyr::summarise(across(where(is.numeric), mean, na.rm = TRUE)) %>%
+  mutate(GroupID = paste0(GroupID, "_mean")) %>%
+  ungroup() %>%
+  unite("NewName", GroupID, remove = FALSE) %>%
+  column_to_rownames("NewName")
+group_means$GroupVar <- "NA"
+# append them as new rows
+df_new <- bind_rows(asvSet, group_means)
+rm(group_means)
+
+# Collapse metadata the same way
+metaSet <- metaSet %>%
+  group_by(GroupID, GroupVar) %>%
+  dplyr::summarize(
+    across(where(is.numeric), ~ mean(.x, na.rm = TRUE)),
+    across(where(~ !is.numeric(.x)), ~ first(.x)),
+    .groups = "drop"
+  ) %>%
+  unite("NewName", GroupID, GroupVar, remove = FALSE)
+
+#Summarize the taxa in an asv table that's being subset by metaSet
+asvSet[, c(1, 2)] <- list(NULL)
+taxasum <- summarize_taxa(features = as.data.frame(t(asvSet)), taxonomy = taxonomy %>% column_to_rownames("ASV"))
+features = taxasum$Class #Change this to Phylum, Order, etc... 
+features <- as.data.frame(make_proportion(features))
+plotfeats <- names(sort(rowMeans(features, na.rm = TRUE), decreasing = TRUE)[1:10]) # extract the top N most 
+
+metaSet$Type[metaSet$Type == "Middle"] <- "Middle MGA"
+metaSet$Type[metaSet$Type == "TopSeal"] <- "TopSeal MGA"
+
+metaSet$GroupVar <- factor(
+  metaSet$GroupVar,
+  levels = c(
+    "n/a",
+    "none",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Blank",
+    "Acetate",
+    "Formate",
+
+    "Glycerol",
+    "Propionate",
+    "Pyruvate",
+        "Glucose"
+  )
+)
+
+
+fplot <- features %>%
+  as.data.frame() %>%
+  rownames_to_column("Taxon") %>%
+  gather(-Taxon, key = "NewName", value = "Abundance") %>%
+  mutate(Taxon = if_else(Taxon %in% plotfeats, Taxon, "Remainder")) %>%
+  group_by(Taxon, NewName) %>%
+  dplyr::summarize(Abundance = sum(Abundance)) %>%
+  ungroup() %>%
+  mutate(Taxon = factor(Taxon, levels = rev(c(plotfeats, "Remainder")))) %>%
+  merge(metaSet, by = "NewName") %>%
+  mutate(
+    NewName = factor(
+      NewName,
+      levels = metaSet$NewName[order(metaSet$GroupVar)]
+    )
+  )
+
+fplot <- fplot %>%
+  mutate(
+    GroupVar = factor(
+      GroupVar,
+      levels = c(
+        "n/a",
+        "none",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Blank",
+        "Acetate",
+        "Formate",
+        "Glycerol",
+        "Propionate",
+        "Pyruvate",
+        "Glucose"
+      )
+    ),
+    NewName = factor(
+      NewName,
+      levels = unique(NewName[order(GroupVar)])
+    )
+  )
+
+#separate Taxon into columns based on the location of the ;
+fplot <- fplot %>% tidyr::separate(Taxon, c('Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', 'Species'), sep = '\\;', remove = FALSE, fill = "right")
+
+bplot <- ggplot(fplot, aes(x = NewName, y = Abundance, fill = Taxon)) +
+  geom_bar(stat = "identity", width = 1.2) +
+  theme_q2r() +
+  theme(panel.border = element_blank()) +
+  # theme(text = element_text(family = "mono"))+
+  #theme(axis.text.x = element_text(angle=90, hjust=1)) +
+  coord_cartesian(expand = FALSE) +
+  xlab("") +
+  ylab("Abundance") +
+  facet_nested(. ~ Type + DaysIncubated, scales = "free_x", space = "free_x", nest_line = element_line(linetype = 2))
+
+bplot <- bplot +
+  scale_fill_manual(values = rev(q2r_palette), name = "") +
+  ggtitle("Green Lake and in-situ Device Community Composition") +
+  theme(legend.position = 'right', plot.title = element_text(size = 12, face = "bold")) +
+  labs(y = "% Abundance", subtitle = "Taxonomic Class by Sample (Averaged by Replicate)") +
+  theme(plot.subtitle = element_text(size = 10), legend.text = element_text(size = 7)) +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  scale_x_discrete(
+    labels = setNames(
+      ifelse(
+        metaSet$Abbr == "Filter", "",
+        ifelse(metaSet$Abbr == "Glu", "Gl", metaSet$Abbr)
+      ),
+      metaSet$NewName
+    )
+  ) +
+  scale_fill_manual(
+    values = rev(q2r_palette),
+    name = "",
+    labels = function(x) sapply(strsplit(x, ";"), function(z) paste(z[2], z[3], sep = "; "))
+  )
+
+bplot
+
+
+ggsave(file = "BarGraph2.svg", device=svg, plot = bplot,width=10,height=7)
+```
+
+## Top 10 putative SRB by species
+
+```{r warning=FALSE, message=FALSE}
+
+metaSet <- subset(meta)
+
+#Edit asv_table to reflect subset
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% metaSet$NewName))
+metaSet <- as.data.frame(subset(metaSet, NewName %in% row.names(asvSet)))
+rownames(metaSet) <- metaSet$NewName
+
+metaSet$AlphaFill[metaSet$AlphaFill == "TopSeal"] <- "TopSealed MGA"
+metaSet$AlphaFill[metaSet$AlphaFill == "Middle"] <- "Middle MGA"
+
+# If this does not run, you need to generate asvSRB in the comparative boxplots section (next section)
+# Average ASV table by GroupID only
+asvSet <- asvSRB %>%
+  mutate(GroupID = metaSet$GroupID) %>%
+  group_by(GroupID) %>%
+  dplyr::summarize(across(where(is.numeric), ~ mean(.x, na.rm = TRUE)), .groups = "drop")
+
+# Collapse metadata by GroupID only
+metaSet <- metaSet %>%
+  group_by(GroupID) %>%
+  dplyr::summarize(
+    across(where(is.numeric), ~ mean(.x, na.rm = TRUE)),
+    across(where(~ !is.numeric(.x)), ~ first(.x)),
+    .groups = "drop"
+  )
+
+# Set rownames
+rownames(asvSet) <- asvSet$GroupID
+asvSet$GroupID <- NULL
+rownames(metaSet) <- metaSet$GroupID
+
+# Fix metadata names
+metaSet$Type[metaSet$Type == "Middle"] <- "Middle MGA"
+metaSet$Type[metaSet$Type == "TopSeal"] <- "TopSeal MGA"
+
+# Summarize taxa
+taxasum <- summarize_taxa(features = as.data.frame(t(asvSet)), taxonomy = taxonomy %>% column_to_rownames("ASV"))
+
+#################################
+features <- taxasum$Species
+#################################
+
+features <- as.data.frame(make_proportion(features))
+colnames(features) <- metaSet$GroupID
+
+# Find top taxa
+plotfeats <- names(sort(rowMeans(features, na.rm = TRUE), decreasing = TRUE)[1:10])
+
+# Prepare plotting dataframe
+fplot <- features %>%
+  as.data.frame() %>%
+  rownames_to_column("Taxon") %>%
+  gather(-Taxon, key = "GroupID", value = "Abundance")
+
+# Count remaining taxa for each GroupID
+remainder_counts <- fplot %>%
+  filter(!Taxon %in% plotfeats, Abundance > 0) %>%
+  group_by(GroupID) %>%
+  summarise(RemainderCount = n_distinct(Taxon), .groups = "drop")
+
+# Collapse non-top taxa into Remainder
+fplot <- fplot %>%
+  mutate(Taxon = if_else(Taxon %in% plotfeats, Taxon, "Remainder")) %>%
+  group_by(Taxon, GroupID) %>%
+  dplyr::summarize(Abundance = sum(Abundance), .groups = "drop") %>%
+  mutate(Taxon = factor(Taxon, levels = rev(c(plotfeats, "Remainder")))) %>%
+  merge(metaSet, by = "GroupID") %>%
+  left_join(remainder_counts, by = "GroupID")
+
+# Split taxonomy
+fplot <- fplot %>%
+  tidyr::separate(Taxon, c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), sep = "\\;", remove = FALSE, fill = "right")
+
+# Plot
+bplot <- ggplot(fplot, aes(x = NewName, y = Abundance, fill = Taxon)) +
+  geom_bar(stat = "identity", width = 1.2) +
+  geom_text(data = subset(fplot, Taxon == "Remainder"), aes(x = NewName, y = 0.97, label = RemainderCount), inherit.aes = FALSE, color = "black", size = 3) +
+  theme_q2r() +
+  theme(panel.border = element_blank()) +
+  # theme(text = element_text(family = "mono"))+
+  #theme(axis.text.x = element_text(angle=90, hjust=1)) +
+  coord_cartesian(expand = FALSE) +
+  xlab("") +
+  ylab("Abundance") +
+  facet_nested(. ~ Type + DaysIncubated, scales = "free_x", space = "free_x", nest_line = element_line(linetype = 2))
+
+bplot <- bplot +
+  scale_fill_manual(values = rev(cyberskittles), name = "", labels = function(x) sapply(strsplit(x, ";"), function(z) {
+    z <- trimws(z)
+    fam <- if(length(z) >= 5) z[5] else ""
+    gen <- if(length(z) >= 6) z[6] else ""
+    sp <- if(length(z) >= 7) z[7] else ""
+    parts <- c()
+    if(!is.na(fam) && fam != "") parts <- c(parts, paste0("", fam))
+    if(!is.na(gen) && gen != "") parts <- c(parts, paste0("", gen))
+    if(!is.na(sp) && sp != "") parts <- c(parts, paste0("", sp))
+    if(length(parts) == 0) return("Remainder")
+    paste(parts, collapse = " ")
+  })) +
+  ggtitle("Green Lake and in-situ Device Community Composition") +
+  theme(legend.position = "right", plot.title = element_text(size = 12, face = "bold"), plot.subtitle = element_text(size = 10), legend.text = element_text(size = 7)) +
+  labs(y = "% Abundance", subtitle = "Mean Taxonomic Class by Group") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent)
+
+bplot
+
+```
+## Top 10 SRB taxa by Species, by Substrate
+
+```{r}
+
+metaSet <- subset(meta)
+
+# Edit asv_table to reflect subset
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% metaSet$NewName))
+metaSet <- as.data.frame(subset(metaSet, NewName %in% row.names(asvSet)))
+rownames(metaSet) <- metaSet$NewName
+
+metaSet$AlphaFill[metaSet$AlphaFill == "TopSeal"] <- "TopSealed MGA"
+metaSet$AlphaFill[metaSet$AlphaFill == "Middle"] <- "Middle MGA"
+
+# If this does not run, you need to generate asvSRB in the comparative boxplots section (next section)
+# Average ASV table by OrgSub only
+asvSet <- asvSRB %>%
+  mutate(OrgSub = metaSet$OrgSub) %>%
+  group_by(OrgSub) %>%
+  dplyr::summarize(
+    across(where(is.numeric), ~ mean(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+# Collapse metadata by OrgSub only
+metaSet <- metaSet %>%
+  group_by(OrgSub) %>%
+  dplyr::summarize(
+    across(where(is.numeric), ~ mean(.x, na.rm = TRUE)),
+    across(where(~ !is.numeric(.x)), ~ first(.x)),
+    .groups = "drop"
+  )
+
+# Set rownames
+rownames(asvSet) <- asvSet$OrgSub
+asvSet$OrgSub <- NULL
+rownames(metaSet) <- metaSet$OrgSub
+
+# Fix metadata names
+metaSet$Type[metaSet$Type == "Middle"] <- "Middle MGA"
+metaSet$Type[metaSet$Type == "TopSeal"] <- "TopSeal MGA"
+
+# Summarize taxa
+taxasum <- summarize_taxa(
+  features = as.data.frame(t(asvSet)),
+  taxonomy = taxonomy %>% column_to_rownames("ASV")
+)
+
+#################################
+features <- taxasum$Species
+#################################
+
+features <- as.data.frame(make_proportion(features))
+colnames(features) <- metaSet$OrgSub
+
+# Find top taxa
+plotfeats <- names(
+  sort(
+    rowMeans(features, na.rm = TRUE),
+    decreasing = TRUE
+  )[1:10]
+)
+
+# Prepare plotting dataframe
+fplot <- features %>%
+  as.data.frame() %>%
+  rownames_to_column("Taxon") %>%
+  gather(-Taxon, key = "OrgSub", value = "Abundance")
+
+# Count remaining taxa for each OrgSub
+remainder_counts <- fplot %>%
+  filter(!Taxon %in% plotfeats, Abundance > 0) %>%
+  group_by(OrgSub) %>%
+  summarise(
+    RemainderCount = n_distinct(Taxon),
+    .groups = "drop"
+  )
+
+# Collapse non-top taxa into Remainder
+fplot <- fplot %>%
+  mutate(
+    Taxon = if_else(
+      Taxon %in% plotfeats,
+      Taxon,
+      "Remainder"
+    )
+  ) %>%
+  group_by(Taxon, OrgSub) %>%
+  dplyr::summarize(
+    Abundance = sum(Abundance),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Taxon = factor(
+      Taxon,
+      levels = rev(c(plotfeats, "Remainder"))
+    )
+  ) %>%
+  merge(metaSet, by = "OrgSub") %>%
+  left_join(remainder_counts, by = "OrgSub")
+
+# Split taxonomy
+fplot <- fplot %>%
+  tidyr::separate(
+    Taxon,
+    c(
+      "Kingdom",
+      "Phylum",
+      "Class",
+      "Order",
+      "Family",
+      "Genus",
+      "Species"
+    ),
+    sep = "\\;",
+    remove = FALSE,
+    fill = "right"
+  )
+
+# Plot
+bplot <- ggplot(
+  fplot,
+  aes(x = OrgSub, y = Abundance, fill = Taxon)
+) +
+  geom_bar(
+    stat = "identity",
+    width = 1.2
+  ) +
+  geom_text(
+    data = subset(fplot, Taxon == "Remainder"),
+    aes(
+      x = OrgSub,
+      y = 0.97,
+      label = RemainderCount
+    ),
+    inherit.aes = FALSE,
+    color = "black",
+    size = 3
+  ) +
+  theme_q2r() +
+  theme(panel.border = element_blank()) +
+  coord_cartesian(expand = FALSE) +
+  xlab("") +
+  ylab("Abundance") +
+  facet_nested(
+    . ~ Type + DaysIncubated,
+    scales = "free_x",
+    space = "free_x",
+    nest_line = element_line(linetype = 2)
+  )
+
+bplot <- bplot +
+  scale_fill_manual(
+    values = rev(cyberskittles),
+    name = "",
+    labels = function(x) sapply(
+      strsplit(x, ";"),
+      function(z) {
+        z <- trimws(z)
+        fam <- if(length(z) >= 5) z[5] else ""
+        gen <- if(length(z) >= 6) z[6] else ""
+        sp <- if(length(z) >= 7) z[7] else ""
+
+        parts <- c()
+
+        if(!is.na(fam) && fam != "")
+          parts <- c(parts, paste0("", fam))
+
+        if(!is.na(gen) && gen != "")
+          parts <- c(parts, paste0("", gen))
+
+        if(!is.na(sp) && sp != "")
+          parts <- c(parts, paste0("", sp))
+
+        if(length(parts) == 0)
+          return("Remainder")
+
+        paste(parts, collapse = " ")
+      }
+    )
+  ) +
+  ggtitle("Green Lake and in-situ Device Community Composition") +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(size = 12, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    legend.text = element_text(size = 7)
+  ) +
+  labs(
+    y = "% Abundance",
+    subtitle = "Mean Taxonomic Class by OrgSub"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::percent
+  )
+
+bplot
+
+
+```
+
+## Top 10 taxa by Class, by Sample
+
+```{r warning=FALSE, message=FALSE, fig.width=7,fig.height=4}
+
+
+#Subset for plotting the bar plot
+metaSet <- subset(meta, Construction != "TO")
+metaSet <- subset(metaSet, Location != "BR")
+asvSet <- subset(asv_table, row.names(asv_table) %in% row.names(metaSet))
+asvSet <- as.data.frame(asvSet)
+metaSet <- metaSet %>% mutate(OrgSub = if_else(OrgSub == "None", "Blank", OrgSub))
+
+# Add GroupID to ASV table
+asvSet$GroupID <- metaSet$GroupID
+
+metaSet$AlphaFill[metaSet$AlphaFill == "TopSeal"] <- "TopSealed MGA"
+metaSet$AlphaFill[metaSet$AlphaFill == "Middle"] <- "Middle MGA"
+
+metaSet <- metaSet %>% mutate(
+  Abbr = case_when(
+    AlphaType == "Filter" & str_detect(NewName, "09") ~ "Sep",
+    AlphaType == "Filter" & str_detect(NewName, "10") ~ "Oct",
+    AlphaType == "Filter" & str_detect(NewName, "11") ~ "Nov",
+    AlphaType == "iChip" ~ "Nov",
+    TRUE ~ as.character(Abbr)
+  )
+)
+
+
+
+#Summarize the taxa in an asv table that's being subset by metaSet
+asvSet[, c(1, 2)] <- list(NULL)
+
+
+#Pit stop: redefine summarize_taxa, because we need to use dplyr::summarize...
+
+summarize_taxa <-function (features, taxonomy) 
+{
+    taxlevels <- c("Kingdom", "Phylum", "Class", "Order", "Family", 
+        "Genus", "Species")
+    if (missing(features)) {
+        stop("Feature table not provided")
+    }
+    if (missing(taxonomy)) {
+        stop("taxonomy table not provided")
+    }
+    if (sum(colnames(taxonomy) %in% taxlevels) != 7) {
+        stop("Taxonomy does not contain expected columns containing Kingdom,Phylum,Class,Order,Family,Genus,Species.")
+    }
+    output <- list()
+    for (lvl in taxlevels) {
+        suppressMessages(output[[lvl]] <- features %>% as.data.frame() %>% 
+            rownames_to_column("FeatureID") %>% gather(-FeatureID, 
+            key = "SampleID", value = "Counts") %>% left_join(taxonomy %>% 
+            rownames_to_column("FeatureID") %>% unite("Taxon", 
+            taxlevels[1:grep(lvl, taxlevels)], sep = "; ") %>% 
+            select(FeatureID, Taxon)) %>% group_by(SampleID, 
+            Taxon) %>% dplyr::summarize(Counts = sum(Counts)) %>% ungroup() %>% 
+            spread(key = SampleID, value = Counts) %>% as.data.frame() %>% 
+            column_to_rownames("Taxon"))
+    }
+    return(output)
+}
+
+asvSet$GroupID<-NULL
+
+taxasum <- summarize_taxa(features = as.data.frame(t(asvSet)), taxonomy = taxonomy %>% column_to_rownames("ASV"))
+
+features = taxasum$Class #Change this to Phylum, Order, etc... 
+
+features <- as.data.frame(make_proportion(features))
+plotfeats <- names(sort(rowMeans(features, na.rm = TRUE), decreasing = TRUE)[1:10]) # extract the top N most 
+
+metaSet$Type[metaSet$Type == "Middle"] <- "Middle MGA"
+metaSet$Type[metaSet$Type == "TopSeal"] <- "TopSeal MGA"
+
+fplot <- features %>%
+  as.data.frame() %>%
+  rownames_to_column("Taxon") %>%
+  gather(-Taxon, key = "NewName", value = "Abundance") %>%
+  mutate(Taxon = if_else(Taxon %in% plotfeats, Taxon, "Remainder")) %>%
+  group_by(Taxon, NewName) %>%
+  dplyr::summarize(Abundance = sum(Abundance)) %>%
+  ungroup() %>%
+  mutate(Taxon = factor(Taxon, levels = rev(c(plotfeats, "Remainder")))) %>%
+  merge(metaSet, by = "NewName")
+
+#separate Taxon into columns based on the location of the ;
+fplot <- fplot %>% tidyr::separate(Taxon, c('Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', 'Species'), sep = '\\;', remove = FALSE, fill = "right")
+
+biplot <- ggplot(fplot, aes(x = NewName, y = Abundance, fill = Taxon)) +
+  geom_bar(stat = "identity", width = 1.2) +
+  theme_q2r() +
+  theme(panel.border = element_blank()) +
+  # theme(text = element_text(family = "mono"))+
+  #theme(axis.text.x = element_text(angle=90, hjust=1)) +
+  coord_cartesian(expand = FALSE) +
+  xlab("") +
+  ylab("Abundance") +
+  facet_nested(. ~ Type + DaysIncubated, scales = "free_x", space = "free_x", nest_line = element_line(linetype = 2))
+
+biplot <- biplot +
+  scale_fill_manual(values = rev(q2r_palette), name = "") +
+  ggtitle("Green Lake and in-situ Device Community Composition") +
+  theme(legend.position = 'right', plot.title = element_text(size = 12, face = "bold")) +
+  labs(y = "% Abundance", subtitle = "Taxonomic Class by Sample (Averaged by Replicate)") +
+  theme(plot.subtitle = element_text(size = 10), legend.text = element_text(size = 7)) +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  scale_x_discrete(
+    labels = setNames(
+      ifelse(
+        metaSet$Abbr == "Filter", "",
+        ifelse(metaSet$Abbr == "Glu", "Gl", metaSet$Abbr)
+      ),
+      metaSet$NewName
+    )
+  ) +
+  scale_fill_manual(
+    values = rev(q2r_palette),
+    name = "",
+    labels = function(x) sapply(strsplit(x, ";"), function(z) paste(z[2], z[3], sep = "; "))
+  )
+
+biplot
+
+
+ggsave(file = "BarGraphAll.svg", device=svg, plot = biplot,width=10,height=7)
+```
+##Top 10 taxa by Group
+
+```{r}
+
+# Subset for plotting the bar plot
+metaSet <- subset(meta, Construction != "TO")
+metaSet <- subset(metaSet, Location != "BR")
+asvSet <- subset(asv_table, row.names(asv_table) %in% row.names(metaSet))
+asvSet <- as.data.frame(asvSet)
+metaSet <- metaSet %>% mutate(OrgSub = if_else(OrgSub == "None", "Blank", OrgSub))
+
+metaSet$AlphaFill[metaSet$AlphaFill == "TopSeal"] <- "TopSealed MGA"
+metaSet$AlphaFill[metaSet$AlphaFill == "Middle"] <- "Middle MGA"
+
+metaSet <- metaSet %>% mutate(
+  Abbr = case_when(
+    AlphaType == "Filter" & str_detect(NewName, "09") ~ "Sep",
+    AlphaType == "Filter" & str_detect(NewName, "10") ~ "Oct",
+    AlphaType == "Filter" & str_detect(NewName, "11") ~ "Nov",
+    AlphaType == "iChip" ~ "Nov",
+    TRUE ~ as.character(Abbr)
+  )
+)
+
+# Remove non-ASV columns
+asvSet[, c(1, 2)] <- list(NULL)
+
+# Redefine summarize_taxa
+summarize_taxa <- function(features, taxonomy) {
+  taxlevels <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+  if (missing(features)) stop("Feature table not provided")
+  if (missing(taxonomy)) stop("taxonomy table not provided")
+  if (sum(colnames(taxonomy) %in% taxlevels) != 7) stop("Taxonomy does not contain expected columns containing Kingdom,Phylum,Class,Order,Family,Genus,Species.")
+  output <- list()
+  for (lvl in taxlevels) {
+    suppressMessages(output[[lvl]] <- features %>% as.data.frame() %>%
+      rownames_to_column("FeatureID") %>%
+      gather(-FeatureID, key = "SampleID", value = "Counts") %>%
+      left_join(taxonomy %>% rownames_to_column("FeatureID") %>%
+        unite("Taxon", taxlevels[1:grep(lvl, taxlevels)], sep = "; ") %>%
+        select(FeatureID, Taxon)) %>%
+      group_by(SampleID, Taxon) %>%
+      dplyr::summarize(Counts = sum(Counts)) %>%
+      ungroup() %>%
+      spread(key = SampleID, value = Counts) %>%
+      as.data.frame() %>%
+      column_to_rownames("Taxon"))
+  }
+  return(output)
+}
+
+# Summarize taxa
+taxasum <- summarize_taxa(features = as.data.frame(t(asvSet)), taxonomy = taxonomy %>% column_to_rownames("ASV"))
+
+features <- taxasum$Class
+
+# Convert to proportions
+features <- as.data.frame(make_proportion(features))
+
+# Get top 10 taxa
+plotfeats <- names(sort(rowMeans(features, na.rm = TRUE), decreasing = TRUE)[1:10])
+
+metaSet$Type[metaSet$Type == "Middle"] <- "Middle MGA"
+metaSet$Type[metaSet$Type == "TopSeal"] <- "TopSeal MGA"
+
+# Convert sample-level data to long format and attach GroupID
+fplot <- features %>%
+  as.data.frame() %>%
+  rownames_to_column("Taxon") %>%
+  gather(-Taxon, key = "NewName", value = "Abundance") %>%
+  mutate(Taxon = if_else(Taxon %in% plotfeats, Taxon, "Remainder")) %>%
+  merge(metaSet[, c("NewName", "GroupID", "Type", "DaysIncubated")], by = "NewName") %>%
+  group_by(Taxon, GroupID, Type, DaysIncubated) %>%
+  dplyr::summarize(Abundance = mean(Abundance, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(Taxon = factor(Taxon, levels = rev(c(plotfeats, "Remainder"))))
+
+# Separate Taxon into columns
+fplot <- fplot %>%
+  tidyr::separate(Taxon, c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), sep = "\\;", remove = FALSE, fill = "right")
+
+# Plot
+biplot <- ggplot(fplot, aes(x = GroupID, y = Abundance, fill = Taxon)) +
+  geom_bar(stat = "identity", width = 0.8) +
+  theme_q2r() +
+  theme(panel.border = element_blank()) +
+  coord_cartesian(expand = FALSE) +
+  xlab("") +
+  ylab("% Abundance") +
+  facet_nested(. ~ Type + DaysIncubated, scales = "free_x", space = "free_x", nest_line = element_line(linetype = 2)) +
+  scale_fill_manual(values = rev(q2r_palette), name = "", labels = function(x) sapply(strsplit(x, ";"), function(z) paste(z[2], z[3], sep = "; "))) +
+  ggtitle("Green Lake and in-situ Device Community Composition") +
+  theme(legend.position = "right", plot.title = element_text(size = 12, face = "bold"), plot.subtitle = element_text(size = 10), legend.text = element_text(size = 7)) +
+  labs(subtitle = "Taxonomic Class by GroupID (Averaged by Replicate)") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent)
+
+biplot
+
+ggsave(file = "BarGraphAllGroupID.svg", device = svg, plot = biplot, width = 10, height = 7)
+
+```
+
+Remove objects, keep biplot for later...
+
+```{r warning=FALSE}
+
+rm(group_means, df_new, taxasum, features, plotfeats, fplot, remainder_counts)
+rm(metaSet, asvSet, df, asvDesulfo, asvDesulfo_t, taxasum, features, plotfeats, fplot, remainder_counts)
+
+```
+
+# █ Comparative Boxplots
+
+## Rel abund. of putitative SRB
+
+```{r}
+
+metaSet <- subset(meta, Location == "GL")
+metaSet <- subset(metaSet, Construction != "TO")
+
+# Edit asv_table to reflect subset
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% metaSet$NewName))
+metaSet <- as.data.frame(subset(metaSet, NewName %in% row.names(asvSet)))
+rownames(metaSet) <- metaSet$NewName
+
+# ============================================================
+# PICRUSt2 sulfate reducers
+# ============================================================
+
+# Keep only ASVs that are both:
+#   1. in the Putitative SRB list
+#   2. present in the current asvSet
+
+asvSRB <- asvSet[, intersect(unlist(putitativeSRB), colnames(asvSet)), drop = FALSE]
+
+# Extract those ASVs from the ASV abundance table
+#asvSRB <- asvSet[, asvSRB, drop = FALSE]
+
+# Make sure samples are in the same order as metaSet
+asvSRB <- asvSRB[rownames(metaSet), ,drop = FALSE]
+
+# Total PICRUSt2-defined sulfate-reducer abundance
+metaSet$SRB_abundance <- rowSums(asvSRB,na.rm = TRUE)
+
+# Relative abundance
+metaSet$SRB_relative <- metaSet$SRB_abundance / rowSums(asvSet, na.rm = TRUE)
+
+# Factorize 
+metaSet$AlphaType <- factor(metaSet$GroupID)
+
+#Doing stats
+anova <- aov(SRB_relative ~ GroupID, data = metaSet)
+anova
+summary(anova)
+
+kruskal.test(SRB_relative ~ GroupID,data = metaSet)
+
+# Pairwise Wilcoxon
+pairwise.wilcox.test(metaSet$SRB_relative,metaSet$AlphaType,p.adjust.method = "BH")
+
+# ANOVA + Tukey
+tukey <- TukeyHSD(anova)
+cld <- multcompLetters4(anova, tukey)
+library(emmeans)
+emm <- emmeans(anova, ~ GroupID)
+
+# Put it in ggpubr format
+levels(metaSet$GroupID)
+
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(rstatix)
+library(emmeans)
+library(multcomp)
+library(scales)
+
+
+cld_df<-multcomp::cld(emm,adjust="tukey",Letters=base::letters)%>%as.data.frame()
+cld_df$GroupID<-factor(as.character(cld_df$GroupID),levels=levels(metaSet$GroupID))
+cld_df$.group<-trimws(cld_df$.group)
+cld_df$y.position<-1.05
+
+
+custom_trans <- scales::trans_new(
+  "piecewise",
+  transform = function(x) {
+    ifelse(x <= 0.20,
+           x / 0.20 * 0.80,
+           0.80 + (x - 0.20) / 0.80 * 0.20)
+  },
+  inverse = function(x) {
+    ifelse(x <= 0.80,
+           x / 0.80 * 0.20,
+           0.20 + (x - 0.80) / 0.20 * 0.80)
+  }
+)
+
+
+allplot<-ggplot(metaSet,aes(x=GroupID,y=SRB_relative,fill=GroupID))+
+  
+  geom_jitter(aes(color=GroupID),position=position_jitterdodge(jitter.width=.1,dodge.width=.7),alpha=1)+
+  geom_boxplot(position=position_dodge(width=.7),width=.6,outlier.shape=NA)+
+  geom_text(
+    data=cld_df,
+    aes(x=GroupID,y=1,label=.group),
+    inherit.aes=FALSE,
+    size=3)+
+  
+  scale_fill_manual(values=mgacolors)+
+  scale_color_manual(values=mgacolors)+
+  scale_y_continuous(limits=c(0,1),labels=scales::percent)+
+  labs(x="",y="% Abundance",fill="",color="",subtitle="Abundance of SRB per sample group")+
+  ggtitle("Enrichment Efficacy")+
+  theme_minimal()+
+scale_y_continuous(
+  trans=custom_trans,
+  breaks=c(0,.05,.10,.15,.20,.40,.60,.80,1),
+  labels=scales::percent
+)+
+  theme(
+    legend.position="none",
+    plot.title=element_text(size=12,face="bold"),
+    plot.subtitle=element_text(size=10)
+  )
+    
+allplot
+
+# How many samples surpass the Filter average?
+sum(metaSet$AlphaType == "MGA" & metaSet$SRB_relative > 0.27, na.rm = TRUE)
+sum(metaSet$AlphaType == "MGA")
+
+ggsave("srbbox.svg", plot = allplot, device = "svg", width = 10, height = 7)
+
+```
+
+## Percent putative 'uncultivated'
+Taxonomic lookup -- quick data table generation to compare percent uncultivated vs percent cultivated OF PUTITATIVE SRB -- NOT OVERALL -- in an overall iChip Filter and MGA
+
+```{r}
+
+asv_summary <- lapply(unique(metaSet$AlphaType), function(group) {
+  samples <- rownames(metaSet[metaSet$AlphaType == group, ])
+  x <- asvDesulfo[, samples, drop = FALSE]
+  data.frame(Feature.ID = rownames(x), total = rowSums(x), AlphaType = group) %>%
+    mutate(relative = total / sum(total))
+}) %>%
+  bind_rows() %>%
+  left_join(taxa, by = "Feature.ID") %>%
+  mutate(cultivation_status = ifelse(grepl("s__[^;]+", Taxon), "Cultivated", "Uncultivated"))
+
+cultivation_summary <- asv_summary %>%
+  group_by(AlphaType, cultivation_status) %>%
+  summarise(relative = sum(relative), percent = relative * 100, .groups = "drop")
+
+cultivation_summary
+
+```
+
+Create combination bplot and srbplot
+
+```{r warning=FALSE, fig.width=11, fig.height=5}
+
+allplot2 <- (allplot| bplot) + plot_layout(widths = c(3,4))
+
+ggsave("allplot_redo.svg", plot = allplot2, device = "svg", width = 10, height = 7)
+
+```
+
+Remove unneeded objects.
+
+```{r warning=FALSE}
+
+rm(anova, tukey, cld, emm, contr, contr_df, srbplot, mgaplot, max_y)
+rm(asv_summary, cultivation_summary)
+rm(cld_df, allplot, mgaplot, combined)
+
+```
+
+
+
+## Rel abund. % uncultiable
+
+```{r fig.width=7,fig.height=3}
+
+# Filter
+metaSet <- meta
+asvSet <- as.data.frame(asv_table[row.names(asv_table) %in% row.names(metaSet), ])
+asvSet <- t(asvSet[, colSums(asvSet) > 1] %>% filter_features(1, 1))
+ASVassi <- taxonomy %>% transmute(ASV, SpeciesAssigned = ifelse(is.na(Species), "Unassigned", "Assigned"))
+
+# ASV set
+unassigned_asvs <- intersect(ASVassi$ASV[ASVassi$SpeciesAssigned == "Unassigned"], rownames(asvSet))
+col_totals <- colSums(asvSet)
+
+# Percent unassigned
+pct_unassigned <- colSums(asvSet[unassigned_asvs, , drop = FALSE]) / col_totals
+unassigned_df <- data.frame(Sample = names(col_totals), PercentUnassigned = pct_unassigned)
+
+sample_abundance <- unassigned_df %>%
+  left_join(metaSet %>% tibble::rownames_to_column("Sample") %>% dplyr::select(Sample, GroupID), by = "Sample") %>%
+  mutate(
+    GroupID = case_when(GroupID == "GL_Filter" ~ "Filter", str_detect(GroupID, "29") ~ "iChip", TRUE ~ GroupID),
+    main_group = case_when(
+      GroupID %in% c("Filter", "iChip") ~ GroupID,
+      str_detect(GroupID, "56") ~ "56",
+      str_detect(GroupID, "118") ~ "118",
+      str_detect(GroupID, "146") ~ "146",
+      TRUE ~ GroupID
+    ),
+    subtype = case_when(
+      GroupID %in% c("Filter", "iChip") ~ GroupID,
+      str_detect(GroupID, "_M$") ~ "M",
+      str_detect(GroupID, "_TS$") ~ "TS",
+      TRUE ~ "Other"
+    ),
+    main_group = factor(main_group, levels = c("Filter", "iChip", "56", "118", "146")),
+    subtype = factor(subtype)
+  )
+
+## Original CLDs (black)
+model <- aov(PercentUnassigned ~ GroupID, data = sample_abundance)
+emm <- emmeans(model, ~ GroupID)
+cld_df <- multcomp::cld(emm, adjust = "tukey", Letters = letters) %>%
+  as.data.frame() %>%
+  mutate(
+    main_group = case_when(
+      GroupID == "Filter" ~ "Filter",
+      str_detect(GroupID, "iChip") ~ "iChip",
+      str_detect(GroupID, "56") ~ "56",
+      str_detect(GroupID, "118") ~ "118",
+      str_detect(GroupID, "146") ~ "146",
+      TRUE ~ GroupID
+    )
+  )
+
+species <- ggplot(sample_abundance, aes(x = main_group)) +
+  # jitter for PercentUnassigned
+  geom_jitter(
+    aes(y = PercentUnassigned, color = GroupID),
+    position = position_jitterdodge(jitter.width = .1, dodge.width = .7),
+    alpha = 1, show.legend = FALSE
+  ) +
+  geom_text(
+    data = cld_df,
+    aes(x = main_group, y = 1.10, label = .group, group = GroupID),
+    color = "black",
+    position = position_dodge(width = .7),
+    inherit.aes = FALSE, size = 3
+  ) +
+  # boxplot for PercentUnassigned (main)
+  geom_boxplot(
+    aes(y = PercentUnassigned, fill = GroupID),
+    position = position_dodge(width = .7),
+    width = .6, outlier.shape = NA
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_color_manual(values = mgacolors) +
+  scale_fill_manual(values = mgacolors) +
+  theme_minimal() +
+  scale_x_discrete(labels = c(Filter = "Filter", iChip = "iChip", `56` = "56", `118` = "118", `146` = "146")) +
+  labs(x = NULL, y = "% Abundance", title = "")
+
+species
+
+# Filter
+metaSet <- meta %>% filter(Construction != "TO", Location != "BR")
+asvSet <- as.data.frame(asv_table[row.names(asv_table) %in% row.names(metaSet), ])
+asvSet <- t(asvSet[, colSums(asvSet) > 1] %>% filter_features(1, 1))
+ASVassi <- taxonomy %>% transmute(ASV, SpeciesAssigned = ifelse(is.na(Genus), "Unassigned", "Assigned"))
+
+# ASV set
+unassigned_asvs <- intersect(ASVassi$ASV[ASVassi$SpeciesAssigned == "Unassigned"], rownames(asvSet))
+col_totals <- colSums(asvSet)
+
+# Percent unassigned
+pct_unassigned <- colSums(asvSet[unassigned_asvs, , drop = FALSE]) / col_totals
+unassigned_df <- data.frame(Sample = names(col_totals), PercentUnassigned = pct_unassigned)
+
+sample_abundance <- unassigned_df %>%
+  left_join(metaSet %>% tibble::rownames_to_column("Sample") %>% dplyr::select(Sample, GroupID), by = "Sample") %>%
+  mutate(
+    GroupID = case_when(GroupID == "GL_Filter" ~ "Filter", str_detect(GroupID, "29") ~ "iChip", TRUE ~ GroupID),
+    main_group = case_when(
+      GroupID %in% c("Filter", "iChip") ~ GroupID,
+      str_detect(GroupID, "56") ~ "56",
+      str_detect(GroupID, "118") ~ "118",
+      str_detect(GroupID, "146") ~ "146",
+      TRUE ~ GroupID
+    ),
+    subtype = case_when(
+      GroupID %in% c("Filter", "iChip") ~ GroupID,
+      str_detect(GroupID, "_M$") ~ "M",
+      str_detect(GroupID, "_TS$") ~ "TS",
+      TRUE ~ "Other"
+    ),
+    main_group = factor(main_group, levels = c("Filter", "iChip", "56", "118", "146")),
+    subtype = factor(subtype)
+  )
+
+## Original CLDs (black)
+model <- aov(PercentUnassigned ~ GroupID, data = sample_abundance)
+emm <- emmeans(model, ~ GroupID)
+cld_df <- multcomp::cld(emm, adjust = "tukey", Letters = letters) %>%
+  as.data.frame() %>%
+  mutate(
+    main_group = case_when(
+      GroupID == "Filter" ~ "Filter",
+      str_detect(GroupID, "iChip") ~ "iChip",
+      str_detect(GroupID, "56") ~ "56",
+      str_detect(GroupID, "118") ~ "118",
+      str_detect(GroupID, "146") ~ "146",
+      TRUE ~ GroupID
+    )
+  )
+
+genus <- ggplot(sample_abundance, aes(x = main_group)) +
+  # jitter for PercentUnassigned
+  geom_jitter(
+    aes(y = PercentUnassigned, color = GroupID),
+    position = position_jitterdodge(jitter.width = .1, dodge.width = .7),
+    alpha = 1, show.legend = FALSE
+  ) +
+  geom_text(
+    data = cld_df,
+    aes(x = main_group, y = 1.10, label = .group, group = GroupID),
+    color = "black",
+    position = position_dodge(width = .7),
+    inherit.aes = FALSE, size = 3
+  ) +
+  # boxplot for PercentUnassigned (main)
+  geom_boxplot(
+    aes(y = PercentUnassigned, fill = GroupID),
+    position = position_dodge(width = .7),
+    width = .6, outlier.shape = NA
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_color_manual(values = mgacolors) +
+  scale_fill_manual(values = mgacolors) +
+  theme_minimal() +
+  scale_x_discrete(labels = c(Filter = "Filter", iChip = "iChip", `56` = "56", `118` = "118", `146` = "146")) +
+  labs(x = NULL, y = "% Abundance", title = "")
+
+genus
+
+#GET LEGEND
+pp4 <- genus +
+  scale_fill_manual(
+    values = mgacolors,
+    breaks = c("Filter", "iChip", "GL_56_M", "GL_56_TS", "GL_118_M", "GL_118_TS", "GL_146_M", "GL_146_TS"),
+    labels = c("Filter", "iChip", "56-day Middle", "56-day TopSealed", "118-day Middle", "118-day TopSealed", "146-day Middle", "146-day TopSealed")
+  )
+
+legend <- cowplot::get_legend(pp4)
+
+species <- species +
+  ggtitle("Uncultivated Relative Abundance") +
+  labs(y = "% Abundance", subtitle = "by Species") +
+  scale_y_continuous(labels = scales::percent) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 12, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    panel.grid.major.x = element_blank()
+  )
+
+genus <- genus +
+  ggtitle(" ") +
+  labs(y = " ", subtitle = "by Genus") +
+  scale_y_continuous(labels = scales::percent) +
+  theme(
+    axis.text.y = element_blank(),
+    legend.position = "none",
+    plot.title = element_text(size = 12, face = "bold"),
+    plot.subtitle = element_text(size = 10, margin = margin(0, 0, 0, 0)),
+    panel.grid.major.x = element_blank()
+  )
+
+percentuncult<-(species | genus | plot_spacer() | legend) + plot_layout(widths = c(2, 2, .5, 1))
+ggsave(file = "percentuncult.svg", device=svg, plot = percentuncult,width=7,height=3)
+
+
+```
+
+Remove unneeded objects
+
+```{r}
+
+rm(ASVassi,unassigned_asvs,col_totals,pct_unassigned,unassigned_df,sample_abundance,model,emm,cld_df,species,genus,pp4,legend)
+
+```
+
+# █ Deviation-from Linear Ratio Plot for Filter vs MGA
+
+Compare MGA and Filter 
+
+```{r}
+
+metaSet <- subset(metaSet, AlphaType != "iChip")
+
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% metaSet$NewName))
+metaSet <- as.data.frame(subset(metaSet, metaSet$NewName %in% row.names(asvSet)))
+
+Total <- as.data.frame(prop.table(as.matrix(asvSet), margin = 1))
+Total$RepName <- metaSet$NewNameNoRep[match(rownames(Total), metaSet$NewName)]
+Total$Group <- metaSet$AlphaType[match(rownames(Total), metaSet$NewName)]
+
+# replicate name, group, ASV, and "value" which is proportion of each ASV
+Total_long <- Total %>%
+  tidyr::pivot_longer(cols = where(is.numeric), names_to = "ASV", values_to = "value")
+
+# Now, get a mean and sd value for each ASV by filter and MGA
+Alpha_summary <- Total_long %>%
+  dplyr::group_by(Group, ASV) %>%
+  dplyr::summarise(mean = mean(value, na.rm = TRUE), sd = sd(value, na.rm = TRUE), .groups = "drop")
+
+pvals <- Total_long %>%
+  dplyr::group_by(ASV) %>%
+  dplyr::summarise(p_value = wilcox.test(value ~ Group)$p.value, .groups = "drop") %>%
+  dplyr::mutate(p_adj = p.adjust(p_value, method = "BH"))
+
+Compare <- Alpha_summary %>%
+  tidyr::pivot_wider(names_from = Group, values_from = c(mean, sd)) %>%
+  dplyr::filter(mean_Filter > 0, mean_MGA > 0)
+
+taxonomy$tax_label <- apply(
+  taxonomy[, c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")],
+  1,
+  function(x) paste(tail(x[!is.na(x) & x != ""], 2), collapse = " ")
+)
+
+Compare <- Compare %>%
+  dplyr::left_join(pvals, by = "ASV") %>%
+  dplyr::left_join(taxonomy[, c("ASV", "tax_label")], by = "ASV") %>%
+  dplyr::mutate(sig = !is.na(p_adj) & p_adj < 0.05) %>%
+  mutate(
+    direction = case_when(
+      sig == FALSE ~ "Insig.",
+      mean_MGA > mean_Filter ~ "MGA",
+      TRUE ~ "Filter"
+    )
+  )
+
+ven1 <- ggplot(Compare, aes(x = mean_Filter, y = mean_MGA, text = tax_label)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
+  geom_point(aes(color = direction), size = 1) +
+  scale_color_manual(values = c(Insig. = "grey80", MGA = "#ad4b9c", Filter = "#89d814")) +
+  scale_y_log10() +
+  scale_x_log10() +
+  coord_equal() +
+  theme_classic() +
+  labs(
+    x = "Filter mean relative abundance",
+    y = "Other mean relative abundance",
+    title = "Significant ASVs"
+  )
+
+```
+
+Compare iChip and Filter
+
+```{r}
+
+metaSet <- subset(metaSet, AlphaType != "MGA")
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% metaSet$NewName))
+metaSet <- as.data.frame(subset(metaSet, metaSet$NewName %in% row.names(asvSet)))
+
+Total <- as.data.frame(prop.table(as.matrix(asvSet), margin = 1))
+Total$RepName <- metaSet$NewNameNoRep[match(rownames(Total), metaSet$NewName)]
+Total$Group <- metaSet$AlphaType[match(rownames(Total), metaSet$NewName)]
+
+# replicate name, group, ASV, and "value" which is proportion of each ASV
+Total_long <- Total %>%
+  tidyr::pivot_longer(cols = where(is.numeric), names_to = "ASV", values_to = "value")
+
+# Now, get a mean and sd value for each ASV by filter and MGA
+Alpha_summary <- Total_long %>%
+  dplyr::group_by(Group, ASV) %>%
+  dplyr::summarise(mean = mean(value, na.rm = TRUE), sd = sd(value, na.rm = TRUE), .groups = "drop")
+
+pvals <- Total_long %>%
+  dplyr::group_by(ASV) %>%
+  dplyr::summarise(p_value = wilcox.test(value ~ Group, exact = FALSE)$p.value, .groups = "drop") %>%
+  dplyr::mutate(p_adj = p.adjust(p_value, method = "BH"))
+
+Compare <- Alpha_summary %>%
+  tidyr::pivot_wider(names_from = Group, values_from = c(mean, sd)) %>%
+  dplyr::filter(mean_Filter > 0, mean_iChip > 0)
+
+taxonomy$tax_label <- apply(
+  taxonomy[, c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")],
+  1,
+  function(x) paste(tail(x[!is.na(x) & x != ""], 2), collapse = " ")
+)
+
+Compare <- Compare %>%
+  dplyr::left_join(pvals, by = "ASV") %>%
+  dplyr::left_join(taxonomy[, c("ASV", "tax_label")], by = "ASV") %>%
+  dplyr::mutate(sig = !is.na(p_adj) & p_adj < 0.05) %>%
+  mutate(
+    direction = case_when(
+      sig == FALSE ~ "ns",
+      mean_iChip > mean_Filter ~ "iChip",
+      TRUE ~ "Filter"
+    )
+  )
+
+ven2 <- ggplot(Compare, aes(x = mean_Filter, y = mean_iChip, text = tax_label)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
+  geom_point(aes(color = direction), size = 1) +
+  scale_color_manual(values = c(ns = "grey80", iChip = "#ffa800", Filter = "#89d814")) +
+  scale_y_log10() +
+  scale_x_log10() +
+  coord_equal() +
+  theme_classic() +
+  labs(
+    x = "Filter mean relative abundance",
+    y = "Other mean relative abundance",
+    title = "Significant ASVs"
+  )
+
+```
+
+iChip vs MGA
+
+```{r}
+metaSet <- subset(meta, Location == "GL")
+metaSet <- subset(metaSet, AlphaType != "Filter")
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% metaSet$NewName))
+metaSet <- as.data.frame(subset(metaSet, metaSet$NewName %in% row.names(asvSet)))
+
+
+Total <- as.data.frame(prop.table(as.matrix(asvSet), margin = 1))
+
+Total$RepName <- metaSet$NewNameNoRep[match(rownames(Total), metaSet$NewName)]
+Total$Group <- metaSet$AlphaType[match(rownames(Total), metaSet$NewName)]
+
+# replicate name, group, ASV, and "value" which is proportion of each ASV
+Total_long <- Total %>%
+  tidyr::pivot_longer(cols = where(is.numeric), names_to = "ASV", values_to = "value")
+
+# Now, get a mean and sd value for each ASV by filter and MGA
+Alpha_summary <- Total_long %>%
+  dplyr::group_by(Group, ASV) %>%
+  dplyr::summarise(mean = mean(value, na.rm = TRUE), sd = sd(value, na.rm = TRUE), .groups = "drop")
+
+pvals <- Total_long %>%
+  dplyr::group_by(ASV) %>%
+  dplyr::summarise(p_value = wilcox.test(value ~ Group)$p.value, .groups = "drop") %>%
+  dplyr::mutate(p_adj = p.adjust(p_value, method = "BH"))
+
+Compare <- Alpha_summary %>%
+  tidyr::pivot_wider(names_from = Group, values_from = c(mean, sd))
+
+Compare <- Compare %>%
+  dplyr::filter(mean_MGA > 0, mean_iChip > 0)
+
+taxonomy$tax_label <- apply(taxonomy[, c("Kingdom","Phylum","Class","Order","Family","Genus","Species")], 1, function(x) paste(tail(x[!is.na(x) & x != ""], 2), collapse = " "))
+
+Compare <- Compare %>%
+  dplyr::left_join(pvals, by = "ASV") %>%
+  dplyr::left_join(taxonomy[, c("ASV","tax_label")], by = "ASV") %>%
+  dplyr::mutate(sig = !is.na(p_adj) & p_adj < 0.05)
+
+
+Compare <- Compare %>%
+  mutate(
+    direction = case_when(
+      sig == FALSE ~ "ns",
+      mean_iChip > mean_MGA ~ "iChip",
+      TRUE ~ "MGA"
+    )
+  )
+
+ven3<-ggplot(Compare, aes(x = mean_iChip, y = mean_MGA, text = tax_label)) +
+  
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = "dashed",
+    color = "grey40"
+  ) +
+
+  geom_point(aes(color = direction), size = 1) +
+
+  scale_color_manual(values = c(
+    ns = "grey80",
+    iChip = "#ffa800",
+    MGA = "#ad4b9c"
+  )) +
+
+  scale_y_log10() +
+  scale_x_log10() +
+  coord_equal() +
+
+  theme_classic() +
+
+  labs(
+    x = "Filter mean relative abundance",
+    y = "Other mean relative abundance",
+    title = "Significant ASVs"
+  )
+
+```
+
+combine figure
+
+```{r}
+
+# # Plot by ASV
+# p<-plot_tax_enrichment(asvSet, metaSet, taxonomy,
+#                     stat_level = "ASV",
+#                     tax_levels = c("Kingdom","Phylum","Genus"),
+#                     filter_group = "Construction",   # Metadata group to select
+#                     filter_label = c("F"),           # label in the metadata group for filtering
+#                     p_cutoff = 0.05                  # FDR cutoff
+#                     )
+# ggplotly(p)
+# htmlwidgets::saveWidget(p, "deviationfromlinear.html")
+# 
+# 
+# # Plot by Phylum
+# p<-plot_tax_enrichment(rare, metaSet, taxonomy,
+#                     stat_level = "Phylum",
+#                     tax_levels = c("Kingdom","Phylum"),
+#                     filter_label = "F",       # label in Construction for Filter
+#                     p_cutoff = 0.05           # FDR cutoff
+#                     )
+# ggplotly(p)
+```
+
+```{r fig.width=8,fig.height=4}
+
+
+
+venn<-venn+ggtitle("Unique and Enriched ASVs by Treatment") + theme_minimal() + theme(legend.position = 'none', plot.title = element_text(size = 12, face = "bold")) + labs(y="",subtitle = "a. Unique ASVs")+ theme(plot.subtitle=element_text(size=10), axis.title=element_blank(),plot.margin=unit(c(1,0,1,0), "pt"))+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+        axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+scale_fill_manual(values = c(
+    MGA = "#ad4b9c",
+    iChip = "#ffa800",
+    Filter = "#89d814"
+  ))
+
+venn
+
+
+ven1<-ven1+ggtitle("")+theme( axis.text.y = element_text(angle = 90),plot.subtitle=element_text(size=10),legend.position = 'none', axis.title=element_blank(),plot.margin=unit(c(0,0,0,0), "pt")) +labs(subtitle = "b. MGA vs Filter",y="",x = "") +   scale_x_log10(limits = c(1e-6, 1e-0)) +
+  scale_y_log10(limits = c(1e-6, 1e-0)) +
+  coord_fixed(ratio = 1)
+
+ven2<-ven2+ggtitle("")+theme(axis.text.y = element_text(angle = 90),plot.subtitle=element_text(size=10),legend.position = 'none', axis.title=element_blank(),plot.margin=unit(c(0,0,0,0), "pt")) +labs(subtitle = "c. iChip vs Filter",y="",x = "")+   scale_x_log10(limits = c(1e-6, 1e-0)) +
+  scale_y_log10(limits = c(1e-6, 1e-0)) +
+  coord_fixed(ratio = 1) +  theme(
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+ven3<-ven3+ggtitle("")+theme(axis.text.y = element_text(angle = 90),plot.subtitle=element_text(size=10),legend.position = 'none', axis.title=element_blank(),plot.margin=unit(c(0,0,0,0), "pt")) +labs(subtitle = "d. iChip vs MGA",y="",x = "")+   scale_x_log10(limits = c(1e-6, 1e-0)) +
+  scale_y_log10(limits = c(1e-6, 1e-0)) +
+  coord_fixed(ratio = 1)+  theme(
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+
+
+
+#legend rip
+
+legend_plot <- ggplot(data.frame(
+  Group = factor(c("MGA", "iChip", "Filter", "Insignificant."),
+                 levels = c("MGA", "iChip", "Filter", "Insignificant"))
+), aes(x = Group, fill = Group)) +
+  geom_bar() +
+  scale_fill_manual(values = c(
+    MGA = "#ad4b9c",
+    iChip = "#ffa800",
+    Filter = "#89d814",
+    Non-significant` = "grey70"
+  )) +
+  theme_void() +
+  theme(
+    legend.position = "bottom"
+  )+theme(plot.subtitle=element_text(size=10), axis.title=element_blank(),plot.margin=unit(c(0,0,0,0), "pt"))
+legend <- cowplot::get_legend(legend_plot)
+
+
+
+
+
+
+
+hi<-(venn | ven1 | ven2 |ven3) /
+legend +
+  plot_layout(
+    heights = c(5, 0.25),        # top vs bottom row height
+    widths  = c(5, 1, 1, 1)     # top row column ratios
+  )
+
+
+#( (venn | ven1 | ven2 | ven3) / legend ) + plot_layout(widths = c(3,1,1,1,2)) 
+
+
+ggsave(file = "captured.svg", device=svg, plot = hi,width=8,height=5)
+
+
+```
+
+kruskal wallace
+
+```{r}
+
+metaSet <- subset(meta, Location == "GL")
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% metaSet$NewName))
+metaSet <- as.data.frame(subset(metaSet, metaSet$NewName %in% row.names(asvSet)))
+
+
+Total <- as.data.frame(prop.table(as.matrix(asvSet), margin = 1))
+
+Total$RepName <- metaSet$NewNameNoRep[match(rownames(Total), metaSet$NewName)]
+Total$Group <- metaSet$AlphaType[match(rownames(Total), metaSet$NewName)]
+
+# replicate name, group, ASV, and "value" which is proportion of each ASV
+Total_long <- Total %>%
+  tidyr::pivot_longer(cols = where(is.numeric), names_to = "ASV", values_to = "value")
+
+library(FSA)
+
+kw_results <- Total_long %>%
+  group_by(ASV) %>%
+  summarise(
+    p_kw = kruskal.test(value ~ Group)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(p_kw_adj = p.adjust(p_kw, method = "BH"))
+
+sig_asvs <- kw_results %>%
+  filter(p_kw_adj < 0.05)
+
+means <- Total_long %>%
+  group_by(ASV, Group) %>%
+  summarise(mean_abund = mean(value), .groups = "drop")
+
+winner <- means %>%
+  group_by(ASV) %>%
+  slice_max(mean_abund, n = 1) %>%
+  ungroup()
+
+sig_taxa <- sig_asvs %>%
+  inner_join(winner, by = "ASV")
+
+Filter_set <- sig_taxa %>%
+  filter(Group == "Filter") %>%
+  pull(ASV)
+
+MGA_set <- sig_taxa %>%
+  filter(Group == "MGA") %>%
+  pull(ASV)
+
+iChip_set <- sig_taxa %>%
+  filter(Group == "iChip") %>%
+  pull(ASV)
+
+library(eulerr)
+
+fit2 <- euler(list(
+  Filter = Filter_set,
+  MGA = MGA_set,
+  iChip = iChip_set
+))
+
+plot(fit2,
+  quantities = TRUE,
+  fills = c("#1b9e77", "#d95f02", "#7570b3"),
+  alpha = 0.5,
+  labels = TRUE,
+  edges = TRUE)
+
+
+
+```
+
+Remove unneeded objects
+
+```{r}
+
+rm(Total, Total_long)
+
+```
+
+
+```{r}
+
+
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(rstatix)
+library(emmeans)
+library(multcomp)
+library(scales)
+
+metaSet <- subset(meta, Location == "GL")
+metaSet <- subset(metaSet, Construction != "TO")
+
+# Edit asv_table to reflect subset
+asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% metaSet$NewName))
+metaSet <- as.data.frame(subset(metaSet, NewName %in% row.names(asvSet)))
+rownames(metaSet) <- metaSet$NewName
+
+
+
+# Keep ONLY ASVs present in taxonomy_selected
+picrust_asvs <- taxonomy_selected2$ASV[taxonomy_selected2$ASV %in% colnames(asvSet)]
+
+# Subset abundance table to those ASVs
+asvPicrust <- asvSet[, picrust_asvs, drop = FALSE]
+
+# Make sure samples are in the same order as metaSet
+asvPicrust <- asvPicrust[rownames(metaSet), , drop = FALSE]
+
+metaSet$total_reads_check <- rowSums(asvSet, na.rm = TRUE)  # ground truth
+
+metaSet$SRB_abundance <- rowSums(asvPicrust, na.rm = TRUE)
+metaSet$SRB_relative <- metaSet$SRB_abundance / metaSet$total_reads_check
+
+
+metaSet <- metaSet %>%
+  mutate(main_group = case_when(
+    GroupID == "Filter" ~ "Filter",
+    GroupID == "iChip" ~ "iChip",
+    str_detect(GroupID, "56") ~ "56",
+    str_detect(GroupID, "118") ~ "118",
+    str_detect(GroupID, "146") ~ "146",
+    TRUE ~ as.character(GroupID)
+  ))
+
+metaSet$main_group <- factor(metaSet$main_group, levels = c("Filter", "iChip", "56", "118", "146"))
+
+metaSet$GroupID <- factor(metaSet$GroupID,
+  levels = c("Filter", "iChip", "56 M", "118 M", "146 M", "56 TS", "118 TS", "146 TS")
+)
+
+
+# stats <- compare_means(SRB_relative ~ GroupID, data = metaSet, method = "wilcox.test", ref.group = "GL_Filter", p.adjust.method = "holm")
+# 
+# stats <- rstatix::add_y_position(stats, data = metaSet, formula = SRB_relative ~ GroupID)
+# 
+# model <- aov(SRB_relative ~ GroupID, data = metaSet)
+# emm <- emmeans(model, ~ GroupID)
+
+
+
+
+
+# 
+# cld_df <- multcomp::cld(emm, adjust = "tukey", Letters = letters) %>% as.data.frame()
+# 
+# cld_df$GroupID <- factor(cld_df$GroupID, levels = levels(metaSet$GroupID))
+# 
+# # Map to main_group so labels land on same x-axis system
+# cld_df <- cld_df %>%
+#   mutate(main_group = case_when(
+#     GroupID == "GL_Filter" ~ "Filter",
+#     str_detect(GroupID, "29") ~ "iChip",
+#     str_detect(GroupID, "56") ~ "56",
+#     str_detect(GroupID, "118") ~ "118",
+#     str_detect(GroupID, "146") ~ "146",
+#     TRUE ~ NA_character_
+#   ))
+# 
+# cld_df$main_group <- factor(cld_df$main_group, levels = levels(metaSet$main_group))
+# cld_df$y.position <- cld_df$emmean + 0.05 * max(metaSet$SRB_relative)
+# cld_df$.group <- c("abc", "a", " ab", "ab ", " b", "b ", "bc", " c")
+# 
+
+
+
+
+
+allplot<-ggplot(metaSet, aes(x = main_group, y = SRB_relative, fill = GroupID)) +
+
+  geom_jitter(
+    aes(color = GroupID),
+    position = position_jitterdodge(
+      jitter.width = 0.1,
+      dodge.width = 0.7),alpha = 1) +
+  
+    geom_boxplot(
+    position = position_dodge(width = 0.7),
+    width = 0.6,
+    outlier.shape = NA
+  ) +
+
+#   geom_text(
+#   data = cld_df,
+#   aes(
+#     x = main_group,
+#     y = 1.1,
+#     label = .group,
+#     group = GroupID
+#   ),
+#   position = position_dodge(width = 0.7),
+#   inherit.aes = FALSE,
+#   size = 3
+# )+
+  
+  
+  scale_fill_manual(values = mgacolors) +
+  scale_color_manual(values = mgacolors) +
+
+scale_y_continuous(
+labels = scales::percent)+
+
+  labs(
+    x = "",
+    y = "% SRB Relative Abundance"
+  ) +
+
+  theme_minimal() 
+
+allplot
+
+
+```
+
+# █ Supplementary Work
+
+
+## Patescibacteria
+
+After seeing in the loadings graph that Patescibacteria is ac
+
+Trying to figure out how to plot abundance of patescibaceria in samples... Pull it out of the files from earlier idk how to automate this i dont think u can / its not easy
+
+```         
+Feature ID: 62b458c5e852bdaa8248d5666129a8e6
+
+TACGTATGTCCCAAGCGTTACCCGGAATCACTGGGTGTAAAGGGTTCGTAGGTGGTTTGAAAAGTTGGATATGAAAGACCGGAGCTCAACTCCGAGTTTGTCTTCAAAACTCTCAGACTAGAATTAGGGAGAGGTAAGCGGAATTCTAAGTGTAGGGGTGCAATCCGTAGATACTTAGAGGAACACCAAAAGCGAAGGCAGCTTACTGGAACTATATTGACGCTAAAGAACGAAAGCGTGGGTAGCGAAAAGG
+```
+
+```{r}
+patesci<-as.data.frame(asv_table)
+patesci<-as.data.frame(patesci$"62b458c5e852bdaa8248d5666129a8e6")
+rownames(patesci)<-rownames(asv_table)
+names(patesci)[1]<-"reads"
+
+ggplotly(ggplot(patesci, aes(x = rownames(patesci), y = reads)) +
+  geom_bar(stat = "identity", fill = "lightgreen", color = "black") +
+  labs(title = "Patesci", 
+       x = "", 
+       y = "Reads") +
+  theme_minimal() +
+   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)))
+```
+
+ok now im going to try to pull out all patescis and plot that
+
+```{r}
+
+metaSet <- subset(meta, Construction != "TO")
+metaSet <- subset(meta, Location == "GL")
+  asvSet <- as.data.frame(subset(asv_table, row.names(asv_table) %in% row.names(metaSet)))
+
+
+#find untrimmed patesci
+patesci_list<-taxa[grepl("Patescibacteria", taxa$Taxon), ]
+asv_table_patesci<-as.data.frame(t(asvSet)) #It's just asv_table transposed
+rownames(patesci_list)<-patesci_list$Feature.ID
+untrimmed_patesci_merged <- merge(patesci_list, asv_table_patesci, by=0, all=FALSE)
+
+#pull the total patesci reads and compare to just the most populous patesci
+hi<-untrimmed_patesci_merged[2:3]
+untrimmed_patesci_merged[1:4]<-NULL
+hi$reads <- rowSums(select_if(untrimmed_patesci_merged, is.numeric), na.rm = TRUE)
+sum(hi$reads)
+hi<-hi[grepl("JAACSU01", hi$Taxon), ]
+sum(hi$reads)
+
+asv_table_patesci<-t(asv_table_patesci)
+
+
+
+
+meta_summary <- metaSet %>%
+  group_by(GroupID) %>%
+  summarise(
+    DaysIncubated = unique(DaysIncubated)[1],
+    Construction  = unique(Construction)[1],
+    .groups = "drop"
+  )
+
+
+
+
+
+#find trimmed patesci
+patesci_list<-taxa[grepl("Patescibacteria", taxa$Taxon), ]
+asv_table_patesci<-as.data.frame(asv_table_bar) #It's just asv_table transposed
+rownames(patesci_list)<-patesci_list$Feature.ID
+trimmed_patesci_merged <- merge(patesci_list, asv_table_patesci, by=0, all=FALSE)
+
+rownames(trimmed_patesci_merged) <- trimmed_patesci_merged$Feature.ID
+rownames(untrimmed_patesci_merged) <-  untrimmed_patesci_merged$Feature.ID
+
+# Remove columns
+trimmed_patesci_merged <- trimmed_patesci_merged[, !(names(trimmed_patesci_merged) %in% c("Row.names", "Feature.ID", "Taxon", "Confidence"))]
+untrimmed_patesci_merged <- untrimmed_patesci_merged[, !(names(untrimmed_patesci_merged) %in% c("Row.names", "Feature.ID", "Taxon", "Confidence"))]
+
+rm(patesci_list,asv_table_patesci)
+
+# Filter controls + 0,0's from the untrimmed data
+untrimmed_patesci_merged<-untrimmed_patesci_merged[,!grepl("ZymoCom|ZymoDNA|NTC|ExtCon", colnames(untrimmed_patesci_merged))]
+
+
+#sum these--not plotting ALL patesci's, but plotting them summed by sample...
+trimmed_patesci_merged<-as.data.frame(colSums(trimmed_patesci_merged))
+untrimmed_patesci_merged<-as.data.frame(colSums(untrimmed_patesci_merged))
+
+#rename them so bind_rows works
+colnames(trimmed_patesci_merged) <-"reads"
+colnames(untrimmed_patesci_merged) <-"reads"
+
+#new sample column so that it doesnt die with the merge
+trimmed_patesci_merged$sample<-rownames(trimmed_patesci_merged)
+untrimmed_patesci_merged$sample<-rownames(untrimmed_patesci_merged)
+
+
+all = bind_rows(
+  mutate(trimmed_patesci_merged, group = "trimmed"),
+  mutate(untrimmed_patesci_merged, group = "untrimmed"))
+
+
+ggplotly(ggplot(all, aes(fill=group, y=reads, x=sample)) + 
+    geom_bar(position="dodge", stat="identity") +
+    theme_minimal() +
+      labs(title = "Patescibacteria (all) read count per sample", 
+       x = "", 
+       y = "Reads") +
+   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 2)))
+
+```
+
+
+
+
+## Acetate Colorimetric Assay 
+
+
+### Standard Curve Construction
+
+Known concentrations of Sodium Acetate in DI water were measured on a spectrophotometer at 460 nm.
+
+```{r}
+
+library(tidyverse)
+library(broom)
+
+standard_curve <- tibble(
+  Acetate_M = c(
+    0.5,
+    0.25,
+    0.125,
+    0.0625,
+    0.03125,
+    0.015625,
+    0.0078125,
+    0.00390625,
+    0.001953125
+  ),
+  Abs460 = c(
+    2.023,
+    1.118,
+    0.443,
+    0.219,
+    0.115,
+    0.064,
+    0.036,
+    0.018,
+    0.011
+  )
+)
+
+# Linear regression
+standard_model <- lm(
+  Abs460 ~ Acetate_M,
+  data = standard_curve
+)
+
+# Model summary
+summary(standard_model)
+
+# Extract standard curve intercept and slope
+standard_intercept <- coef(standard_model)[["(Intercept)"]]
+standard_slope <- coef(standard_model)[["Acetate_M"]]
+
+# Linear view
+ggplot(
+  standard_curve,
+  aes(x = Acetate_M, y = Abs460)
+) +
+  geom_point(size = 3) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    se = TRUE
+  ) +
+  labs(
+    x = "Acetate concentration (M)",
+    y = "Absorbance at 460 nm"
+  ) +
+  theme_classic()
+
+# Log view
+ggplot(
+  standard_curve,
+  aes(x = Acetate_M, y = Abs460)
+) +
+  geom_point(size = 3) +
+  scale_x_log10() +
+  labs(
+    x = "Acetate concentration (M, log scale)",
+    y = "Absorbance at 460 nm"
+  ) +
+  theme_classic()
+```
+
+### Diffusion Test
+
+OD460 was recorded over 200+ days of diffusion of acetate-plug gradient cultures in microcosms.
+
+```{r}
+
+OD460 <- read_csv("C:/Users/runet/Documents/WORK/Labwork/2024 MGA/OD460 Acetate Colorimetric Assay.csv")
+
+initial_plug_concentration <- 1  # M
+plug_volume <- 1                 # mL
+chamber_volume <- 45             # mL
+
+acetate_data <- OD460 %>%
+  mutate(
+    Silica = recode(Silica, "None" = "No silica", "60A" = "Silica gel"),
+    Construction = recode(Construction, "TopSealed" = "Top sealed", "TopOutOfWater" = "Out of water")
+  ) %>%
+  pivot_longer(cols = c("0", "1", "2", "5", "12", "42", "237"), names_to = "Time", values_to = "OD460") %>%
+  mutate(
+    Time = as.numeric(Time),
+    chamber_Acetate = pmax((OD460 - standard_intercept) / standard_slope, 0),
+    chamber_Acetate_mmol = chamber_Acetate * chamber_volume,
+    initial_Acetate_mmol = initial_plug_concentration * plug_volume,
+    plug_Acetate_mmol = initial_Acetate_mmol - chamber_Acetate_mmol,
+    plug_Acetate = if_else(Time == 0, initial_plug_concentration, plug_Acetate_mmol / plug_volume)
+  )
+
+acetate_summary <- acetate_data %>%
+  group_by(Construction, Time) %>%
+  dplyr::summarise(
+    mean_chamber_Acetate = mean(chamber_Acetate, na.rm = TRUE),
+    sd_chamber_Acetate = sd(chamber_Acetate, na.rm = TRUE),
+    mean_plug_Acetate = mean(plug_Acetate, na.rm = TRUE),
+    sd_plug_Acetate = sd(plug_Acetate, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+### Calculate Acetate Depletion Rate
+
+acetate_fit <- acetate_data %>%
+  filter(Construction == "Top sealed", Time >= 0, Time <= 42) %>%
+  lm(plug_Acetate ~ Time, data = .)
+
+fit_summary <- broom::tidy(acetate_fit)
+
+depletion_slope <- coef(acetate_fit)[["Time"]]
+depletion_intercept <- coef(acetate_fit)[["(Intercept)"]]
+depletion_xint <- -depletion_intercept / depletion_slope
+
+### Project Early Depletion Rate to 237 Days
+
+projection_data <- data.frame(Time = seq(0, 237, length.out = 200))
+
+fit_pred <- predict(acetate_fit, newdata = projection_data, interval = "confidence", level = 0.95)
+
+projection_data <- cbind(
+  projection_data,
+  fit = fit_pred[, "fit"],
+  ymin = fit_pred[, "lwr"],
+  ymax = fit_pred[, "upr"]
+)
+
+### Calculate Actual 42-to-237 Day Depletion Rate
+
+blue_42_237 <- acetate_summary %>%
+  filter(Construction == "Top sealed", Time %in% c(42, 237)) %>%
+  dplyr::summarise(
+    slope = (mean_plug_Acetate[Time == 237] - mean_plug_Acetate[Time == 42]) / (237 - 42),
+    xint = 42 - mean_plug_Acetate[Time == 42] / slope
+  )
+
+### Plot
+
+hi <- ggplot(acetate_summary %>% filter(Construction == "Top sealed"), aes(x = Time)) +
+  geom_ribbon(
+    data = projection_data,
+    aes(x = Time, ymin = ymin, ymax = ymax, fill = "95% confidence interval"),
+    alpha = 0.15,
+    inherit.aes = FALSE
+  ) +
+  geom_line(
+    aes(y = mean_plug_Acetate, color = "Concentration (Plug)"),
+    linewidth = 1
+  ) +
+  geom_point(
+    aes(y = mean_plug_Acetate),
+    color = "blue",
+    shape = 17,
+    size = 2
+  ) +
+  geom_errorbar(
+    aes(ymin = mean_plug_Acetate - sd_plug_Acetate, ymax = mean_plug_Acetate + sd_plug_Acetate),
+    color = "blue",
+    width = 0.5
+  ) +
+  geom_text(
+    data = blue_42_237,
+    aes(x = xint, y = -0.015, label = paste0(sprintf("%.0f", xint), " Days")),
+    color = "blue",
+    inherit.aes = FALSE
+  ) +
+  geom_hline(yintercept = 0.01, linetype = "dashed") +
+  geom_line(
+    data = projection_data,
+    aes(x = Time, y = fit, color = "Calculated depletion rate projected from early time points"),
+    linewidth = 0.7,
+    inherit.aes = FALSE
+  ) +
+  geom_vline(xintercept = depletion_xint, color = "red", linetype = "dotted") +
+  geom_text(
+    data = data.frame(
+      x = depletion_xint,
+      y = -0.015,
+      label = paste0(sprintf("%.0f", depletion_xint), " Days")
+    ),
+    aes(x = x, y = y, label = label),
+    color = "red",
+    inherit.aes = FALSE
+  ) +
+  scale_color_manual(values = c(
+    "Concentration (Plug)" = "blue",
+    "Calculated depletion rate projected from early time points" = "red"
+  )) +
+  scale_fill_manual(values = c("95% confidence interval" = "red")) +
+  labs(
+    title = "Acetate Depletion Over Time",
+    x = "Time (days)",
+    y = "Acetate concentration (M)",
+    color = NULL,
+    fill = NULL
+  ) +
+  coord_cartesian(xlim = c(0, 200), ylim = c(-0.1, NA)) +
+  theme_classic() +
+  theme(legend.position = "bottom")
+
+ggsave(file = "acetate.svg", device=svg, plot = hi,width=9,height=7)
+
+```
+
+
